@@ -32,11 +32,13 @@ Testing/
 # IDE and Editor Files
 .vscode/
 .idea/
+.cache/
 *.swp
 *.swo
 *~
 .DS_Store
 Thumbs.db
+
 
 # Testing and Profiling
 *.gcda
