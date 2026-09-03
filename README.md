@@ -1,0 +1,1 @@
+# SIH26119-Indigenous-GPU-Accelerated-Optimization-Solver
