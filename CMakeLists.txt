@@ -37,10 +37,8 @@ else()
     message(STATUS "CUDA backend acceleration is DISABLED (CPU foundation build)")
 endif()
 
-# Core Include Directories
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
+# Core Source Library
+add_subdirectory(src)
 
 # Test Harness Integration via CTest
 if(BUILD_TESTING)
