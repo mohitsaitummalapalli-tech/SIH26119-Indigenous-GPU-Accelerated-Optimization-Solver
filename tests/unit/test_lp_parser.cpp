@@ -192,6 +192,180 @@ int main() {
         }
     }
 
+    // 5. Multi-Point Quadratic Evaluations and Factor-of-Two Hard Negative Controls
+    {
+        struct TestCase {
+            std::string name;
+            std::string lp_str;
+            double expected_qxx;
+            double expected_qyy;
+            double expected_qxy; // stored Q_xy = b / 2
+        };
+
+        std::vector<TestCase> cases = {
+            {"[ x ^ 2 ] / 2",
+             "Minimize\n obj: [ x ^ 2 ] / 2\nSubject To\n c1: x >= 0\nEnd\n",
+             1.0, 0.0, 0.0},
+            {"[ 4 x * y ] / 2",
+             "Minimize\n obj: [ 4 x * y ] / 2\nSubject To\n c1: x >= 0\nEnd\n",
+             0.0, 0.0, 2.0},
+            {"[ x ^ 2 + 4 x * y + 7 y ^ 2 ] / 2",
+             "Minimize\n obj: [ x ^ 2 + 4 x * y + 7 y ^ 2 ] / 2\nSubject To\n c1: x >= 0\nEnd\n",
+             1.0, 7.0, 2.0},
+            {"[ 2 x ^ 2 + 6 x * y + 8 y ^ 2 ] / 2",
+             "Minimize\n obj: [ 2 x ^ 2 + 6 x * y + 8 y ^ 2 ] / 2\nSubject To\n c1: x >= 0\nEnd\n",
+             2.0, 8.0, 3.0}
+        };
+
+        std::vector<std::pair<double, double>> eval_pts = {
+            {3.0, 5.0},
+            {-2.0, 4.0},
+            {0.5, -1.5},
+            {0.0, 0.0}
+        };
+
+        for (const auto& tc : cases) {
+            std::istringstream iss(tc.lp_str);
+            auto res = reader.read_stream(iss);
+            check(res.ok(), "Parse " + tc.name);
+            if (res.ok()) {
+                const auto& model = res.value();
+                double qxx = 0.0, qyy = 0.0, qxy = 0.0;
+                auto vx_opt = model.get_variable_index("x");
+                auto vy_opt = model.get_variable_index("y");
+                VariableIndex vx = vx_opt.is_ok() ? vx_opt.value() : 0;
+                VariableIndex vy = vy_opt.is_ok() ? vy_opt.value() : 0;
+
+                for (const auto& qt : model.objective().quadratic_terms) {
+                    if (qt.var1 == vx && qt.var2 == vx) qxx = qt.coefficient;
+                    else if (qt.var1 == vy && qt.var2 == vy) qyy = qt.coefficient;
+                    else qxy = qt.coefficient;
+                }
+
+                check(std::abs(qxx - tc.expected_qxx) < 1e-12, tc.name + " Q_xx match");
+                check(std::abs(qyy - tc.expected_qyy) < 1e-12, tc.name + " Q_yy match");
+                check(std::abs(qxy - tc.expected_qxy) < 1e-12, tc.name + " Q_xy match (b/2)");
+
+                for (const auto& [x_val, y_val] : eval_pts) {
+                    double correct_val = eval_independent_quad(tc.expected_qxx, tc.expected_qyy, tc.expected_qxy, x_val, y_val);
+                    double actual_val = eval_independent_quad(qxx, qyy, qxy, x_val, y_val);
+                    check(std::abs(actual_val - correct_val) < 1e-12,
+                          tc.name + " independent evaluation at (" + std::to_string(x_val) + ", " + std::to_string(y_val) + ")");
+
+                    // Negative control: If off-diagonal term was erroneously NOT divided by 2 (Q_xy = 2*qxy)
+                    if (tc.expected_qxy != 0.0 && x_val != 0.0 && y_val != 0.0) {
+                        double buggy_val = eval_independent_quad(tc.expected_qxx, tc.expected_qyy, 2.0 * tc.expected_qxy, x_val, y_val);
+                        check(std::abs(actual_val - buggy_val) > 1e-6,
+                              tc.name + " asserts factor-of-two erroneous evaluation produces hard mismatch");
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Non-zero, Accurate Source Line Number Tracking in Parse Errors
+    {
+        // Malformed line 3: missing '/ 2' divisor
+        std::string lp_err1 =
+            "\\ Line 1 comment\n"
+            "Minimize\n"
+            " obj: [ 4 x * y ]\n" // Line 3
+            "Subject To\n"
+            " c1: x >= 0\n"
+            "End\n";
+        std::istringstream iss1(lp_err1);
+        auto r1 = reader.read_stream(iss1);
+        check(!r1.ok(), "Detect missing divisor");
+        check(r1.status().line() == 3, "Error line reports line 3 (not line 0): got line " + std::to_string(r1.status().line()));
+
+        // Malformed line 5: expected bound operator
+        std::string lp_err2 =
+            "Minimize\n"
+            " obj: x\n"
+            "Subject To\n"
+            " c1: x >= 0\n"
+            "Bounds\n"
+            " x ?? 10\n" // Line 6
+            "End\n";
+        std::istringstream iss2(lp_err2);
+        auto r2 = reader.read_stream(iss2);
+        check(!r2.ok(), "Detect malformed bound operator");
+        check(r2.status().line() == 6, "Error line reports line 6 (not line 0): got line " + std::to_string(r2.status().line()));
+    }
+
+    // 7. Scientific Notation and Tokenizer Exponent Sign Preservation
+    {
+        std::string lp_sci =
+            "Minimize\n"
+            " obj: +2.5E+4 x - 1e-3 y\n"
+            "Subject To\n"
+            " c1: 1.5e-3 x + y >= -1e-3\n"
+            "Bounds\n"
+            " x <= +2.5E+4\n"
+            " y >= -1e-3\n"
+            "End\n";
+        std::istringstream iss(lp_sci);
+        auto res = reader.read_stream(iss);
+        check(res.ok(), "Parse LP with scientific notation (+2.5E+4, 1.5e-3, -1e-3)");
+        if (res.ok()) {
+            const auto& m = res.value();
+            auto vx = m.get_variable_index("x").value();
+            auto vy = m.get_variable_index("y").value();
+            check(std::abs(m.get_variable(vx).upper_bound - 25000.0) < 1e-9, "x upper bound 25000.0");
+            check(std::abs(m.get_variable(vy).lower_bound - (-0.001)) < 1e-12, "y lower bound -0.001");
+            check(std::abs(m.objective().linear_terms[0].coefficient - 25000.0) < 1e-9, "x coeff +2.5E+4");
+            check(std::abs(m.objective().linear_terms[1].coefficient - (-0.001)) < 1e-12, "y coeff -1e-3");
+        }
+    }
+
+    // 8. Rejection of Malformed Numeric Tokens in LP
+    {
+        auto test_bad_lp = [&](const std::string& num_str) -> bool {
+            std::string lp_str =
+                "Minimize\n"
+                " obj: " + num_str + " x\n"
+                "Subject To\n"
+                " c1: x >= 0\n"
+                "End\n";
+            std::istringstream iss(lp_str);
+            return reader.read_stream(iss).ok();
+        };
+
+        check(!test_bad_lp("12abc"), "Reject malformed 12abc in LP");
+        check(!test_bad_lp("1.2e"), "Reject malformed 1.2e in LP");
+        check(!test_bad_lp("1e+"), "Reject malformed 1e+ in LP");
+        check(!test_bad_lp("--3"), "Reject malformed --3 in LP");
+    }
+
+    // 9. Objective Constant Round-Trip and Offset Parsing
+    {
+        std::string lp_const1 =
+            "Minimize\n"
+            " obj: 2 x + 3 y + 10.5\n"
+            "Subject To\n"
+            " c1: x + y >= 0\n"
+            "End\n";
+        std::istringstream iss1(lp_const1);
+        auto r1 = reader.read_stream(iss1);
+        check(r1.ok(), "Parse LP with trailing objective constant");
+        if (r1.ok()) {
+            check(std::abs(r1.value().objective().offset - 10.5) < 1e-12, "Objective offset is 10.5");
+        }
+
+        std::string lp_const2 =
+            "Minimize\n"
+            " obj: 10.5 + 2 x + 3 y\n"
+            "Subject To\n"
+            " c1: x + y >= 0\n"
+            "End\n";
+        std::istringstream iss2(lp_const2);
+        auto r2 = reader.read_stream(iss2);
+        check(r2.ok(), "Parse LP with leading objective constant");
+        if (r2.ok()) {
+            check(std::abs(r2.value().objective().offset - 10.5) < 1e-12, "Objective offset is 10.5 (leading)");
+        }
+    }
+
     std::cout << "=========================================================\n";
     if (failures == 0) {
         std::cout << "LP PARSER TESTS PASSED\n";

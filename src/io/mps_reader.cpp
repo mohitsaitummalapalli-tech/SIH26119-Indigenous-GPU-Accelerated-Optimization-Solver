@@ -1,4 +1,5 @@
 #include "io/mps_reader.hpp"
+#include "core/numeric_parser.hpp"
 #include <fstream>
 #include <vector>
 #include <cctype>
@@ -25,13 +26,6 @@ std::vector<std::string> tokenize_line(std::string_view line) {
         tokens.emplace_back(line.substr(start, i - start));
     }
     return tokens;
-}
-
-bool parse_double(std::string_view str, double& out_val) {
-    std::string s(str);
-    char* end = nullptr;
-    out_val = std::strtod(s.c_str(), &end);
-    return end != s.c_str() && *end == '\0' && !std::isnan(out_val);
 }
 
 enum class MpsSection {
@@ -101,6 +95,17 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
     std::unordered_map<std::string, VariableType> var_types;
     std::unordered_map<std::string, double> var_lb;
     std::unordered_map<std::string, double> var_ub;
+
+    struct BoundTracker {
+        bool has_lo = false;
+        bool has_up = false;
+        bool has_fx = false;
+        bool has_fr = false;
+        bool has_bv = false;
+        bool has_ui = false;
+        bool has_li = false;
+    };
+    std::unordered_map<std::string, BoundTracker> bound_trackers;
 
     // QUADOBJ storage: (var1, var2) -> value
     std::map<std::pair<std::string, std::string>, double> quadobj_entries;
@@ -219,7 +224,7 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
                 for (size_t k = 1; k + 1 < tokens.size(); k += 2) {
                     const std::string& rname = tokens[k];
                     double val = 0.0;
-                    if (!parse_double(tokens[k + 1], val)) {
+                    if (!parse_strict_double(tokens[k + 1], val)) {
                         return Status::parse_error(line_number, "Invalid numeric value in COLUMNS: " + tokens[k + 1]);
                     }
 
@@ -248,13 +253,18 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
                 for (size_t k = offset; k + 1 < tokens.size(); k += 2) {
                     const std::string& rname = tokens[k];
                     double val = 0.0;
-                    if (!parse_double(tokens[k + 1], val)) {
+                    if (!parse_strict_double(tokens[k + 1], val)) {
                         return Status::parse_error(line_number, "Invalid numeric value in RHS: " + tokens[k + 1]);
                     }
-                    if (row_name_to_idx.find(rname) == row_name_to_idx.end()) {
-                        return Status::parse_error(line_number, "Referenced row in RHS not defined in ROWS: " + rname);
+                    if (rname == obj_name) {
+                        auto st = model.set_objective_offset(val);
+                        if (!st.is_ok()) return st;
+                    } else {
+                        if (row_name_to_idx.find(rname) == row_name_to_idx.end()) {
+                            return Status::parse_error(line_number, "Referenced row in RHS not defined in ROWS: " + rname);
+                        }
+                        rhs_values[rname] = val;
                     }
-                    rhs_values[rname] = val;
                 }
                 break;
             }
@@ -275,7 +285,7 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
                 for (size_t k = offset; k + 1 < tokens.size(); k += 2) {
                     const std::string& rname = tokens[k];
                     double val = 0.0;
-                    if (!parse_double(tokens[k + 1], val)) {
+                    if (!parse_strict_double(tokens[k + 1], val)) {
                         return Status::parse_error(line_number, "Invalid numeric value in RANGES: " + tokens[k + 1]);
                     }
                     if (row_name_to_idx.find(rname) == row_name_to_idx.end()) {
@@ -293,7 +303,8 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
                 }
                 std::string btype = tokens[0];
                 size_t var_idx = 1;
-                if (tokens.size() >= 3 && !parse_double(tokens[2], *(new double))) { // If token 2 is not number, token 1 is set name
+                double dummy_val = 0.0;
+                if (tokens.size() >= 3 && !parse_strict_double(tokens[2], dummy_val)) { // If token 2 is not number, token 1 is set name
                     if (active_bounds_set.empty()) {
                         active_bounds_set = tokens[1];
                     }
@@ -313,33 +324,113 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
 
                 double bval = 0.0;
                 if (tokens.size() > var_idx + 1) {
-                    if (!parse_double(tokens[var_idx + 1], bval)) {
+                    if (!parse_strict_double(tokens[var_idx + 1], bval)) {
                         return Status::parse_error(line_number, "Invalid bound value: " + tokens[var_idx + 1]);
                     }
                 }
 
+                auto& bt = bound_trackers[var_name];
+
                 if (btype == "UP") {
+                    if (bt.has_up) {
+                        return Status::parse_error(line_number, "Duplicate UP bound specified for variable: " + var_name);
+                    }
+                    if (bt.has_fx) {
+                        return Status::parse_error(line_number, "Conflicting UP bound on already fixed (FX) variable: " + var_name);
+                    }
+                    if (bt.has_fr) {
+                        return Status::parse_error(line_number, "Conflicting UP bound on already free (FR) variable: " + var_name);
+                    }
+                    bt.has_up = true;
                     var_ub[var_name] = bval;
                 } else if (btype == "LO") {
+                    if (bt.has_lo) {
+                        return Status::parse_error(line_number, "Duplicate LO bound specified for variable: " + var_name);
+                    }
+                    if (bt.has_fx) {
+                        return Status::parse_error(line_number, "Conflicting LO bound on already fixed (FX) variable: " + var_name);
+                    }
+                    if (bt.has_fr) {
+                        return Status::parse_error(line_number, "Conflicting LO bound on already free (FR) variable: " + var_name);
+                    }
+                    bt.has_lo = true;
                     var_lb[var_name] = bval;
                 } else if (btype == "FX") {
+                    if (bt.has_fx) {
+                        return Status::parse_error(line_number, "Duplicate FX bound specified for variable: " + var_name);
+                    }
+                    if (bt.has_lo) {
+                        return Status::parse_error(line_number, "Conflicting FX bound on variable with prior LO bound: " + var_name);
+                    }
+                    if (bt.has_up) {
+                        return Status::parse_error(line_number, "Conflicting FX bound on variable with prior UP bound: " + var_name);
+                    }
+                    if (bt.has_fr) {
+                        return Status::parse_error(line_number, "Conflicting FX bound on already free (FR) variable: " + var_name);
+                    }
+                    bt.has_fx = true;
+                    bt.has_lo = true;
+                    bt.has_up = true;
                     var_lb[var_name] = bval;
                     var_ub[var_name] = bval;
                 } else if (btype == "FR") {
+                    if (bt.has_fr) {
+                        return Status::parse_error(line_number, "Duplicate FR bound specified for variable: " + var_name);
+                    }
+                    if (bt.has_lo || bt.has_up || bt.has_fx || bt.has_bv) {
+                        return Status::parse_error(line_number, "Conflicting FR bound on variable with prior bound specifications: " + var_name);
+                    }
+                    bt.has_fr = true;
                     var_lb[var_name] = -kInfinity;
                     var_ub[var_name] = kInfinity;
                 } else if (btype == "MI") {
+                    if (bt.has_lo) {
+                        return Status::parse_error(line_number, "Duplicate or conflicting lower bound (MI) for variable: " + var_name);
+                    }
+                    if (bt.has_fx) {
+                        return Status::parse_error(line_number, "Conflicting MI bound on fixed variable: " + var_name);
+                    }
+                    bt.has_lo = true;
                     var_lb[var_name] = -kInfinity;
                 } else if (btype == "PL") {
+                    if (bt.has_up) {
+                        return Status::parse_error(line_number, "Duplicate or conflicting upper bound (PL) for variable: " + var_name);
+                    }
+                    if (bt.has_fx) {
+                        return Status::parse_error(line_number, "Conflicting PL bound on fixed variable: " + var_name);
+                    }
+                    bt.has_up = true;
                     var_ub[var_name] = kInfinity;
                 } else if (btype == "BV") {
+                    if (bt.has_bv || bt.has_fx || bt.has_lo || bt.has_up) {
+                        return Status::parse_error(line_number, "Conflicting BV bound declaration on variable: " + var_name);
+                    }
+                    bt.has_bv = true;
+                    bt.has_lo = true;
+                    bt.has_up = true;
                     var_types[var_name] = VariableType::Binary;
                     var_lb[var_name] = 0.0;
                     var_ub[var_name] = 1.0;
                 } else if (btype == "UI") {
+                    if (bt.has_up || bt.has_ui) {
+                        return Status::parse_error(line_number, "Duplicate upper bound (UI) for variable: " + var_name);
+                    }
+                    if (bt.has_fx) {
+                        return Status::parse_error(line_number, "Conflicting UI bound on fixed variable: " + var_name);
+                    }
+                    bt.has_up = true;
+                    bt.has_ui = true;
                     var_types[var_name] = VariableType::Integer;
                     var_ub[var_name] = bval;
                 } else if (btype == "LI") {
+                    if (bt.has_lo || bt.has_li) {
+                        return Status::parse_error(line_number, "Duplicate lower bound (LI) for variable: " + var_name);
+                    }
+                    if (bt.has_fx) {
+                        return Status::parse_error(line_number, "Conflicting LI bound on fixed variable: " + var_name);
+                    }
+                    bt.has_lo = true;
+                    bt.has_li = true;
                     var_types[var_name] = VariableType::Integer;
                     var_lb[var_name] = bval;
                 } else {
@@ -356,7 +447,7 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
                 const std::string& v1 = tokens[0];
                 const std::string& v2 = tokens[1];
                 double val = 0.0;
-                if (!parse_double(tokens[2], val)) {
+                if (!parse_strict_double(tokens[2], val)) {
                     return Status::parse_error(line_number, "Invalid numeric value in QUADOBJ: " + tokens[2]);
                 }
 
@@ -386,7 +477,7 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
         double ub = var_ub[var_name];
         VariableType vtype = var_types[var_name];
         auto res = model.add_variable(var_name, lb, ub, vtype);
-        if (!res.ok()) {
+        if (!res.is_ok()) {
             return res.status();
         }
     }
@@ -398,7 +489,8 @@ Result<Model> MpsReader::read_stream(std::istream& is, const std::string& source
         VariableIndex v_idx = var_idx_res.value();
 
         if (entry.row_name == obj_name) {
-            model.add_objective_term(v_idx, entry.value);
+            auto st = model.add_objective_term(v_idx, entry.value);
+            if (!st.is_ok()) return st;
         } else {
             con_terms[entry.row_name].emplace_back(v_idx, entry.value);
         }

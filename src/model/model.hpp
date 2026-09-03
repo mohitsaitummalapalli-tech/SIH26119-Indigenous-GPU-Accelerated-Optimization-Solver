@@ -65,7 +65,7 @@ public:
     [[nodiscard]] const Objective& objective() const noexcept { return objective_; }
     [[nodiscard]] Objective& objective() noexcept { return objective_; }
     void set_objective_sense(ObjectiveSense sense) noexcept { objective_.sense = sense; }
-    void set_objective_offset(double offset) noexcept { objective_.offset = offset; }
+    Status set_objective_offset(double offset);
 
     Status set_objective_coefficient(VariableIndex var_idx, double coeff);
     Status add_objective_term(VariableIndex var_idx, double coeff);

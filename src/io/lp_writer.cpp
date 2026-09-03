@@ -102,6 +102,12 @@ Status LpWriter::write_stream(const Model& model, std::ostream& os) {
         }
         os << " ] / 2";
     }
+
+    if (obj.offset > 0.0) {
+        os << " + " << std::setprecision(16) << obj.offset;
+    } else if (obj.offset < 0.0) {
+        os << " - " << std::setprecision(16) << -obj.offset;
+    }
     os << "\n";
 
     // 2. Constraints Section

@@ -230,6 +230,14 @@ Status Model::set_constraint_bounds(ConstraintIndex con_idx, double lb, double u
     return Status::ok();
 }
 
+Status Model::set_objective_offset(double offset) {
+    if (std::isnan(offset) || std::isinf(offset)) {
+        return Status::error(StatusCode::InvalidArgument, "Objective offset cannot be NaN or Infinite");
+    }
+    objective_.offset = offset;
+    return Status::ok();
+}
+
 Status Model::set_objective_coefficient(VariableIndex var_idx, double coeff) {
     if (var_idx >= variables_.size()) {
         return Status::error(StatusCode::InvalidVariableReference, "Variable index out of range");
@@ -458,6 +466,10 @@ bool Model::semantic_equals(const Model& other, double abs_tol, double rel_tol) 
         if (!float_equals(c1, coeff, abs_tol, rel_tol)) {
             return false;
         }
+    }
+
+    if (!float_equals(objective_.offset, other.objective_.offset, abs_tol, rel_tol)) {
+        return false;
     }
 
     // Compare quadratic objective matrix entries Q_ij

@@ -145,6 +145,76 @@ int main() {
         }
     }
 
+    // 4. Objective Constant c0 Round-Trip (LP and MPS)
+    {
+        Model original("Offset_RoundTrip");
+        auto vx = original.add_variable("x", 0.0, 10.0).value();
+        auto vy = original.add_variable("y", 0.0, 10.0).value();
+
+        original.set_objective_sense(ObjectiveSense::Minimize);
+        original.add_objective_term(vx, 2.0);
+        original.add_objective_term(vy, 3.0);
+        original.set_objective_offset(15.75); // Nonzero c0
+        original.set_quadratic_coefficient(vx, vx, 4.0);
+        original.set_quadratic_coefficient(vx, vy, 1.5);
+
+        original.add_constraint("c1", 1.0, 20.0, {{vx, 1.0}, {vy, 1.0}});
+
+        // LP Round-Trip with c0
+        std::ostringstream lp_ss;
+        check(lp_writer.write_stream(original, lp_ss).is_ok(), "Write model with c0 to LP");
+        std::istringstream lp_iss(lp_ss.str());
+        auto lp_res = lp_reader.read_stream(lp_iss);
+        check(lp_res.ok(), "Read model with c0 from LP");
+        if (lp_res.ok()) {
+            check(original.semantic_equals(lp_res.value()), "LP round-trip preserves c0 and model semantics");
+            check(std::abs(lp_res.value().objective().offset - 15.75) < 1e-12, "LP c0 exact value match");
+        }
+
+        // MPS Round-Trip with c0
+        std::ostringstream mps_ss;
+        check(mps_writer.write_stream(original, mps_ss).is_ok(), "Write model with c0 to MPS");
+        std::istringstream mps_iss(mps_ss.str());
+        auto mps_res = mps_reader.read_stream(mps_iss);
+        check(mps_res.ok(), "Read model with c0 from MPS");
+        if (mps_res.ok()) {
+            check(original.semantic_equals(mps_res.value()), "MPS round-trip preserves c0 and model semantics");
+            check(std::abs(mps_res.value().objective().offset - 15.75) < 1e-12, "MPS c0 exact value match");
+        }
+    }
+
+    // 5. Cross-Format Interchange with Negative Objective Offset
+    {
+        std::string lp_neg_offset =
+            "Minimize\n"
+            " obj: 2 x + 3 y - 8.25 + [ 4 x * y ] / 2\n"
+            "Subject To\n"
+            " c1: x + y >= 1\n"
+            "Bounds\n"
+            " x >= 0\n"
+            " y >= 0\n"
+            "End\n";
+
+        std::istringstream lp_in(lp_neg_offset);
+        auto m1_res = lp_reader.read_stream(lp_in);
+        check(m1_res.ok(), "Parse LP with negative objective constant");
+        if (m1_res.ok()) {
+            const auto& m1 = m1_res.value();
+            check(std::abs(m1.objective().offset - (-8.25)) < 1e-12, "Initial model offset -8.25");
+
+            std::ostringstream mps_out;
+            check(mps_writer.write_stream(m1, mps_out).is_ok(), "Serialize negative-offset model to MPS");
+
+            std::istringstream mps_in(mps_out.str());
+            auto m2_res = mps_reader.read_stream(mps_in);
+            check(m2_res.ok(), "Deserialize negative-offset model from MPS");
+            if (m2_res.ok()) {
+                check(m1.semantic_equals(m2_res.value()), "Cross-format negative c0 preserved identically");
+                check(std::abs(m2_res.value().objective().offset - (-8.25)) < 1e-12, "Deserialized MPS c0 matches -8.25");
+            }
+        }
+    }
+
     std::cout << "=========================================================\n";
     if (failures == 0) {
         std::cout << "SERIALIZATION ROUND-TRIP TESTS PASSED\n";

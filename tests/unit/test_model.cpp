@@ -1,7 +1,9 @@
 #include "model/model.hpp"
+#include "core/numeric_parser.hpp"
 #include <iostream>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -186,6 +188,36 @@ int main() {
         // Alter a bound slightly beyond tolerance
         m2.set_variable_bounds(v2_a, 0.0, 5.0001);
         check(!m1.semantic_equals(m2), "Detects semantic bound difference beyond tolerance");
+
+        // Objective offset equality and difference detection
+        m2.set_variable_bounds(v2_a, 0.0, 5.0);
+        m1.set_objective_offset(10.5);
+        check(!m1.semantic_equals(m2), "Detects objective offset difference");
+        m2.set_objective_offset(10.5);
+        check(m1.semantic_equals(m2), "Equal objective offset matches semantically");
+
+        // Reject NaN and Inf in set_objective_offset
+        auto st_nan = m1.set_objective_offset(std::numeric_limits<double>::quiet_NaN());
+        check(!st_nan.is_ok(), "Reject NaN in set_objective_offset");
+        auto st_inf = m1.set_objective_offset(std::numeric_limits<double>::infinity());
+        check(!st_inf.is_ok(), "Reject Infinity in set_objective_offset");
+    }
+
+    // 5. Strict C++20 Numeric Parser Verification
+    {
+        double v = 0.0;
+        check(parse_strict_double("1e-3", v) && std::abs(v - 0.001) < 1e-12, "Strict parser accepts 1e-3");
+        check(parse_strict_double("-1e-3", v) && std::abs(v - (-0.001)) < 1e-12, "Strict parser accepts -1e-3");
+        check(parse_strict_double("+2.5E+4", v) && std::abs(v - 25000.0) < 1e-12, "Strict parser accepts +2.5E+4");
+        check(parse_strict_double("3.141592653589793", v), "Strict parser accepts high-precision float");
+        check(!parse_strict_double("12abc", v), "Strict parser rejects 12abc");
+        check(!parse_strict_double("1.2e", v), "Strict parser rejects 1.2e");
+        check(!parse_strict_double("1e+", v), "Strict parser rejects 1e+");
+        check(!parse_strict_double("--3", v), "Strict parser rejects --3");
+        check(!parse_strict_double("++5", v), "Strict parser rejects ++5");
+        check(!parse_strict_double("+-2", v), "Strict parser rejects +-2");
+        check(!parse_strict_double("1.5 e-3", v), "Strict parser rejects whitespace in number");
+        check(!parse_strict_double("", v), "Strict parser rejects empty string");
     }
 
     std::cout << "=========================================================\n";

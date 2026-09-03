@@ -159,6 +159,13 @@ Status MpsWriter::write_stream(const Model& model, std::ostream& os) {
         }
     }
 
+    if (model.objective().offset != 0.0) {
+        os << "    RHS1      ";
+        format_mps_field(os, obj_row_name, 10);
+        format_mps_num(os, model.objective().offset);
+        os << "\n";
+    }
+
     // 6. RANGES (only if range constraints exist)
     bool has_ranges = false;
     for (const auto& con : cons) {

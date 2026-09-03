@@ -197,6 +197,95 @@ int main() {
         check(!res.ok(), "Reject unsupported QCMATRIX section");
     }
 
+    // 6. Strict MPS BOUNDS Duplicate and Conflict Enforcement
+    {
+        auto test_bound_case = [&](const std::string& b1, const std::string& b2) -> bool {
+            std::string data =
+                "NAME          BND_CONFLICT\n"
+                "ROWS\n"
+                " N  OBJ\n"
+                "COLUMNS\n"
+                "    X         OBJ       1.0\n"
+                "RHS\n"
+                "BOUNDS\n"
+                " " + b1 + " BND1      X         10.0\n"
+                " " + b2 + " BND1      X         20.0\n"
+                "ENDATA\n";
+            std::istringstream iss(data);
+            auto r = reader.read_stream(iss);
+            return r.ok();
+        };
+
+        check(!test_bound_case("LO", "LO"), "Reject duplicate LO bounds");
+        check(!test_bound_case("UP", "UP"), "Reject duplicate UP bounds");
+        check(!test_bound_case("FX", "UP"), "Reject FX followed by UP");
+        check(!test_bound_case("FX", "LO"), "Reject FX followed by LO");
+        check(!test_bound_case("LO", "FX"), "Reject LO followed by FX");
+        check(!test_bound_case("UP", "FX"), "Reject UP followed by FX");
+        check(!test_bound_case("UI", "UI"), "Reject duplicate UI bounds");
+        check(!test_bound_case("LI", "LI"), "Reject duplicate LI bounds");
+        check(!test_bound_case("BV", "FX"), "Reject BV followed by FX");
+        check(!test_bound_case("FX", "BV"), "Reject FX followed by BV");
+
+        // Valid independent combination: LO + UP
+        check(test_bound_case("LO", "UP"), "Accept valid independent LO + UP combination");
+    }
+
+    // 7. Scientific Notation and Objective Offset in MPS
+    {
+        std::string mps_sci =
+            "NAME          SCI_OFFSET\n"
+            "ROWS\n"
+            " N  OBJ\n"
+            " G  C1\n"
+            "COLUMNS\n"
+            "    X         OBJ       1.5e-3    C1        2.0E+4\n"
+            "RHS\n"
+            "    RHS1      OBJ       10.5\n"
+            "    RHS1      C1        -1e-3\n"
+            "BOUNDS\n"
+            " UP BND1      X         +2.5E+4\n"
+            "ENDATA\n";
+
+        std::istringstream iss(mps_sci);
+        auto res = reader.read_stream(iss);
+        check(res.ok(), "Parse MPS with scientific notation and objective offset");
+        if (res.ok()) {
+            const auto& m = res.value();
+            check(std::abs(m.objective().offset - 10.5) < 1e-9, "MPS objective offset c0 == 10.5");
+            auto vx = m.get_variable_index("X").value();
+            check(std::abs(m.objective().linear_terms[0].coefficient - 1.5e-3) < 1e-12, "Linear term coeff 1.5e-3");
+            check(std::abs(m.get_variable(vx).upper_bound - 25000.0) < 1e-9, "Upper bound +2.5E+4 == 25000.0");
+        }
+    }
+
+    // 8. Reject Malformed Numeric Tokens in MPS
+    {
+        std::string mps_bad_num =
+            "NAME          BAD_NUM\n"
+            "ROWS\n"
+            " N  OBJ\n"
+            "COLUMNS\n"
+            "    X         OBJ       12abc\n"
+            "RHS\n"
+            "ENDATA\n";
+        std::istringstream iss(mps_bad_num);
+        auto res = reader.read_stream(iss);
+        check(!res.ok() && res.status().code() == StatusCode::ParseError, "Reject malformed number 12abc in MPS");
+
+        std::string mps_bad_exp =
+            "NAME          BAD_EXP\n"
+            "ROWS\n"
+            " N  OBJ\n"
+            "COLUMNS\n"
+            "    X         OBJ       1e+\n"
+            "RHS\n"
+            "ENDATA\n";
+        std::istringstream iss_exp(mps_bad_exp);
+        auto res_exp = reader.read_stream(iss_exp);
+        check(!res_exp.ok() && res_exp.status().code() == StatusCode::ParseError, "Reject malformed exponent 1e+ in MPS");
+    }
+
     std::cout << "=========================================================\n";
     if (failures == 0) {
         std::cout << "MPS PARSER TESTS PASSED\n";
