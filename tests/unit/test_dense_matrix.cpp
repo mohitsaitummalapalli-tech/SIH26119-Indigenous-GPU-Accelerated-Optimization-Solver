@@ -4,7 +4,46 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
-#include <limits>
+#include <atomic>
+#include <cstdlib>
+#include <new>
+
+static std::atomic<std::size_t> g_allocation_count{0};
+static bool g_track_allocations{false};
+
+void* operator new(std::size_t sz) {
+    if (g_track_allocations) {
+        g_allocation_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = std::malloc(sz);
+    if (!ptr) throw std::bad_alloc();
+    return ptr;
+}
+
+void operator delete(void* ptr) noexcept {
+    std::free(ptr);
+}
+
+void* operator new[](std::size_t sz) {
+    if (g_track_allocations) {
+        g_allocation_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = std::malloc(sz);
+    if (!ptr) throw std::bad_alloc();
+    return ptr;
+}
+
+void operator delete[](void* ptr) noexcept {
+    std::free(ptr);
+}
+
+void operator delete(void* ptr, std::size_t) noexcept {
+    std::free(ptr);
+}
+
+void operator delete[](void* ptr, std::size_t) noexcept {
+    std::free(ptr);
+}
 
 namespace {
 
@@ -159,12 +198,105 @@ void test_transactional_multiply_overflow() {
     CHECK(y.set(0, 77.0).is_ok(), "y.set(0)");
     CHECK(y.set(1, 88.0).is_ok(), "y.set(1)");
 
-    auto status = mat.multiply(x, y);
+    auto scratch = sih26119::DenseVector::create(2, 0.0).value();
+
+    // Hot-path with scratch
+    auto status = mat.multiply(x, y, scratch);
     CHECK(!status.is_ok(), "multiply must fail with error on overflow in row 1");
 
     // Transactional verification: y must remain byte-for-byte / value-for-value unchanged!
     CHECK(y[0] == 77.0, "y[0] must remain 77.0 (unmodified) despite row 0 being finite");
     CHECK(y[1] == 88.0, "y[1] must remain 88.0 (unmodified)");
+
+    // Convenience overload transactional verification
+    CHECK(y.set(0, 77.0).is_ok(), "reset y[0]");
+    CHECK(y.set(1, 88.0).is_ok(), "reset y[1]");
+    auto status_conv = mat.multiply(x, y);
+    CHECK(!status_conv.is_ok(), "convenience multiply must fail on overflow");
+    CHECK(y[0] == 77.0, "y[0] must remain 77.0 after convenience multiply failure");
+    CHECK(y[1] == 88.0, "y[1] must remain 88.0 after convenience multiply failure");
+}
+
+void test_hot_path_zero_allocation_and_workspace() {
+    std::cout << "[TEST] DenseMatrix Hot-Path Zero Allocation and Workspace Invariants\n";
+
+    // 1. Setup matrix (3 rows x 2 cols)
+    auto mat = sih26119::DenseMatrix::create(3, 2, 0.0).value();
+    CHECK(mat.set(0, 0, 1.0).is_ok(), "set(0, 0)");
+    CHECK(mat.set(0, 1, 2.0).is_ok(), "set(0, 1)");
+    CHECK(mat.set(1, 0, 3.0).is_ok(), "set(1, 0)");
+    CHECK(mat.set(1, 1, 4.0).is_ok(), "set(1, 1)");
+    CHECK(mat.set(2, 0, 5.0).is_ok(), "set(2, 0)");
+    CHECK(mat.set(2, 1, 6.0).is_ok(), "set(2, 1)");
+
+    // 2. Create x
+    auto x = sih26119::DenseVector::create(2, 0.0).value();
+    CHECK(x.set(0, 2.0).is_ok(), "x[0]");
+    CHECK(x.set(1, 3.0).is_ok(), "x[1]");
+
+    // 3. Create y
+    auto y = sih26119::DenseVector::create(3, 0.0).value();
+
+    // 4. Create scratch
+    auto scratch = sih26119::DenseVector::create(3, 0.0).value();
+
+    // 5. Warm-up call
+    auto warmup_status = mat.multiply(x, y, scratch);
+    CHECK(warmup_status.is_ok(), "Warm-up hot-path multiply");
+    CHECK(sih26119::approx_equal(y[0], 8.0), "y[0] == 1*2 + 2*3 = 8");
+    CHECK(sih26119::approx_equal(y[1], 18.0), "y[1] == 3*2 + 4*3 = 18");
+    CHECK(sih26119::approx_equal(y[2], 28.0), "y[2] == 5*2 + 6*3 = 28");
+
+    // 6. Reset allocation counter and enable tracking
+    g_allocation_count.store(0, std::memory_order_relaxed);
+    g_track_allocations = true;
+
+    // 7. Execute 100 repeated hot-path calls
+    for (int iter = 0; iter < 100; ++iter) {
+        auto st = mat.multiply(x, y, scratch);
+        if (!st.is_ok()) {
+            CHECK(st.is_ok(), "Iteration must succeed");
+            break;
+        }
+    }
+
+    // 8. Read allocation counter
+    g_track_allocations = false;
+    const std::size_t hotpath_allocs = g_allocation_count.load(std::memory_order_relaxed);
+
+    // 9. Require exactly zero dynamic allocations
+    CHECK(hotpath_allocs == 0, "Repeated hot-path DenseMatrix::multiply must perform exactly zero dynamic allocations");
+
+    // A. Insufficient scratch (< rows)
+    auto small_scratch = sih26119::DenseVector::create(2, 0.0).value();
+    CHECK(y.set(0, 99.0).is_ok(), "set guard");
+    auto bad_scratch_st = mat.multiply(x, y, small_scratch);
+    CHECK(!bad_scratch_st.is_ok(), "Insufficient scratch capacity must be rejected");
+    CHECK(y[0] == 99.0, "y[0] must remain unchanged on insufficient scratch failure");
+
+    // B. Scratch alias x
+    CHECK(!mat.multiply(x, y, x).is_ok(), "scratch alias x must be rejected");
+
+    // C. Scratch alias y
+    CHECK(!mat.multiply(x, y, y).is_ok(), "scratch alias y must be rejected");
+
+    // D. x alias y (square matrix)
+    auto sq_mat = sih26119::DenseMatrix::create(2, 2, 1.0).value();
+    auto sq_scratch = sih26119::DenseVector::create(2, 0.0).value();
+    auto sq_vec = sih26119::DenseVector::create(2, 1.0).value();
+    CHECK(!sq_mat.multiply(sq_vec, sq_vec, sq_scratch).is_ok(), "x alias y must be rejected");
+
+    // J. Oversized scratch: extra entries beyond rows must remain untouched
+    auto big_scratch = sih26119::DenseVector::create(6, 0.0).value();
+    CHECK(big_scratch.set(3, 111.0).is_ok(), "set extra 3");
+    CHECK(big_scratch.set(4, 222.0).is_ok(), "set extra 4");
+    CHECK(big_scratch.set(5, 333.0).is_ok(), "set extra 5");
+
+    auto big_st = mat.multiply(x, y, big_scratch);
+    CHECK(big_st.is_ok(), "Multiply with oversized scratch must succeed");
+    CHECK(big_scratch[3] == 111.0, "big_scratch[3] must remain untouched");
+    CHECK(big_scratch[4] == 222.0, "big_scratch[4] must remain untouched");
+    CHECK(big_scratch[5] == 333.0, "big_scratch[5] must remain untouched");
 }
 
 } // namespace
@@ -180,6 +312,7 @@ int main() {
     test_dimension_mismatch_and_aliasing();
     test_non_finite_rejection();
     test_transactional_multiply_overflow();
+    test_hot_path_zero_allocation_and_workspace();
 
     if (g_failures > 0) {
         std::cerr << "\n[RESULT] FAILED with " << g_failures << " failure(s).\n";

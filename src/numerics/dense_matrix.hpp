@@ -47,14 +47,25 @@ public:
     /// Fills all matrix elements with a finite scalar value.
     [[nodiscard]] Status fill(Scalar val) noexcept;
 
-    /// Matrix-vector product in-place: y = Ax.
-    /// Requirements:
-    /// - cols() == x.size()
-    /// - rows() == y.size()
-    /// - x and y must NOT alias (&x != &y and x.data() != y.data()).
-    [[nodiscard]] Status multiply(const DenseVector& x, DenseVector& y) const noexcept;
+    /// Hot-path zero-allocation matrix-vector product in-place: y = Ax using caller-owned scratch workspace.
+    ///
+    /// Contract:
+    /// - Zero dynamic heap allocations during execution.
+    /// - Dimensions: cols() == x.size(), rows() == y.size().
+    /// - Scratch capacity: scratch.size() >= rows(). Only elements [0, rows()) may be modified.
+    ///   Extra entries [rows(), scratch.size()) remain untouched.
+    /// - Aliasing: x, y, and scratch must all be distinct storage objects (no pairwise aliasing).
+    /// - Transactional guarantee: y is modified if and only if all outputs [0, rows()) are finite.
+    ///   On arithmetic overflow or error, returns StatusCode::InvalidArgument and y remains strictly unmodified.
+    ///   (scratch may contain intermediate values on failure).
+    [[nodiscard]] Status multiply(const DenseVector& x, DenseVector& y, DenseVector& scratch) const noexcept;
 
-    /// Matrix-vector product allocating a new DenseVector: returns y = Ax.
+    /// Convenience in-place matrix-vector product: y = Ax.
+    /// Allocates temporary scratch workspace internally and forwards to the 3-argument overload.
+    [[nodiscard]] Status multiply(const DenseVector& x, DenseVector& y) const;
+
+    /// Convenience value-returning matrix-vector product: returns y = Ax.
+    /// Allocates destination vector and temporary scratch workspace.
     [[nodiscard]] Result<DenseVector> multiply(const DenseVector& x) const;
 
 private:

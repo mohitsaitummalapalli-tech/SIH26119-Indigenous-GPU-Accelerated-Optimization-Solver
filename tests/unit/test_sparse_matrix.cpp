@@ -4,7 +4,46 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
-#include <limits>
+#include <atomic>
+#include <cstdlib>
+#include <new>
+
+static std::atomic<std::size_t> g_allocation_count{0};
+static bool g_track_allocations{false};
+
+void* operator new(std::size_t sz) {
+    if (g_track_allocations) {
+        g_allocation_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = std::malloc(sz);
+    if (!ptr) throw std::bad_alloc();
+    return ptr;
+}
+
+void operator delete(void* ptr) noexcept {
+    std::free(ptr);
+}
+
+void* operator new[](std::size_t sz) {
+    if (g_track_allocations) {
+        g_allocation_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = std::malloc(sz);
+    if (!ptr) throw std::bad_alloc();
+    return ptr;
+}
+
+void operator delete[](void* ptr) noexcept {
+    std::free(ptr);
+}
+
+void operator delete(void* ptr, std::size_t) noexcept {
+    std::free(ptr);
+}
+
+void operator delete[](void* ptr, std::size_t) noexcept {
+    std::free(ptr);
+}
 
 namespace {
 
@@ -237,10 +276,21 @@ void test_transactional_sparse_multiply_and_residual_overflow() {
     CHECK(y.set(0, 33.0).is_ok(), "y.set(0)");
     CHECK(y.set(1, 44.0).is_ok(), "y.set(1)");
 
-    auto status_mul = mat.multiply(x, y);
+    auto scratch = sih26119::DenseVector::create(2, 0.0).value();
+
+    // Hot-path with scratch
+    auto status_mul = mat.multiply(x, y, scratch);
     CHECK(!status_mul.is_ok(), "SparseMatrix::multiply must fail on row 1 overflow");
     CHECK(y[0] == 33.0, "y[0] must remain 33.0 (unmodified) despite row 0 being finite");
     CHECK(y[1] == 44.0, "y[1] must remain 44.0 (unmodified)");
+
+    // Convenience multiply overload
+    CHECK(y.set(0, 33.0).is_ok(), "reset y[0]");
+    CHECK(y.set(1, 44.0).is_ok(), "reset y[1]");
+    auto status_conv = mat.multiply(x, y);
+    CHECK(!status_conv.is_ok(), "convenience multiply must fail on overflow");
+    CHECK(y[0] == 33.0, "y[0] must remain 33.0 after convenience failure");
+    CHECK(y[1] == 44.0, "y[1] must remain 44.0 after convenience failure");
 
     // Residual test: r = b - Ax
     auto b = sih26119::DenseVector::create(2, 0.0).value();
@@ -248,10 +298,145 @@ void test_transactional_sparse_multiply_and_residual_overflow() {
     CHECK(r.set(0, 55.0).is_ok(), "r.set(0)");
     CHECK(r.set(1, 66.0).is_ok(), "r.set(1)");
 
-    auto status_res = mat.residual(b, x, r);
+    // Hot-path residual with scratch
+    auto status_res = mat.residual(b, x, r, scratch);
     CHECK(!status_res.is_ok(), "SparseMatrix::residual must fail on row 1 overflow");
     CHECK(r[0] == 55.0, "r[0] must remain 55.0 (unmodified) despite row 0 being finite");
     CHECK(r[1] == 66.0, "r[1] must remain 66.0 (unmodified)");
+
+    // Convenience residual overload
+    CHECK(r.set(0, 55.0).is_ok(), "reset r[0]");
+    CHECK(r.set(1, 66.0).is_ok(), "reset r[1]");
+    auto status_res_conv = mat.residual(b, x, r);
+    CHECK(!status_res_conv.is_ok(), "convenience residual must fail on overflow");
+    CHECK(r[0] == 55.0, "r[0] must remain 55.0 after convenience failure");
+    CHECK(r[1] == 66.0, "r[1] must remain 66.0 after convenience failure");
+}
+
+void test_hot_path_zero_allocation_and_workspace() {
+    std::cout << "[TEST] SparseMatrix Hot-Path Zero Allocation and Workspace Invariants\n";
+
+    // 1. Setup CSR matrix (3 rows x 2 cols)
+    const std::vector<sih26119::Triplet> triplets = {
+        {0, 0, 1.0}, {0, 1, 2.0},
+        {1, 0, 3.0}, {1, 1, 4.0},
+        {2, 0, 5.0}, {2, 1, 6.0}
+    };
+    auto mat = sih26119::SparseMatrix::from_triplets(3, 2, triplets).value();
+
+    // 2. Vectors for multiply
+    auto x = sih26119::DenseVector::create(2, 0.0).value();
+    CHECK(x.set(0, 2.0).is_ok(), "x[0]");
+    CHECK(x.set(1, 3.0).is_ok(), "x[1]");
+
+    auto y = sih26119::DenseVector::create(3, 0.0).value();
+    auto scratch = sih26119::DenseVector::create(3, 0.0).value();
+
+    // 3. Warm-up multiply call
+    auto warmup_mul = mat.multiply(x, y, scratch);
+    CHECK(warmup_mul.is_ok(), "Warm-up SpMV");
+    CHECK(sih26119::approx_equal(y[0], 8.0), "y[0] == 8");
+    CHECK(sih26119::approx_equal(y[1], 18.0), "y[1] == 18");
+    CHECK(sih26119::approx_equal(y[2], 28.0), "y[2] == 28");
+
+    // 4. Repeated hot-path multiply with zero dynamic allocations
+    g_allocation_count.store(0, std::memory_order_relaxed);
+    g_track_allocations = true;
+
+    for (int iter = 0; iter < 100; ++iter) {
+        auto st = mat.multiply(x, y, scratch);
+        if (!st.is_ok()) {
+            CHECK(st.is_ok(), "SpMV iteration failed");
+            break;
+        }
+    }
+
+    g_track_allocations = false;
+    const std::size_t spmv_allocs = g_allocation_count.load(std::memory_order_relaxed);
+    CHECK(spmv_allocs == 0, "Repeated hot-path SparseMatrix::multiply must perform exactly zero dynamic allocations");
+
+    // 5. Vectors for residual
+    auto b = sih26119::DenseVector::create(3, 0.0).value();
+    CHECK(b.set(0, 10.0).is_ok(), "b[0]");
+    CHECK(b.set(1, 20.0).is_ok(), "b[1]");
+    CHECK(b.set(2, 30.0).is_ok(), "b[2]");
+
+    auto r = sih26119::DenseVector::create(3, 0.0).value();
+
+    // 6. Warm-up residual call
+    auto warmup_res = mat.residual(b, x, r, scratch);
+    CHECK(warmup_res.is_ok(), "Warm-up residual");
+    CHECK(sih26119::approx_equal(r[0], 2.0), "r[0] == 10 - 8 = 2");
+    CHECK(sih26119::approx_equal(r[1], 2.0), "r[1] == 20 - 18 = 2");
+    CHECK(sih26119::approx_equal(r[2], 2.0), "r[2] == 30 - 28 = 2");
+
+    // 7. Repeated hot-path residual with zero dynamic allocations
+    g_allocation_count.store(0, std::memory_order_relaxed);
+    g_track_allocations = true;
+
+    for (int iter = 0; iter < 100; ++iter) {
+        auto st = mat.residual(b, x, r, scratch);
+        if (!st.is_ok()) {
+            CHECK(st.is_ok(), "Residual iteration failed");
+            break;
+        }
+    }
+
+    g_track_allocations = false;
+    const std::size_t residual_allocs = g_allocation_count.load(std::memory_order_relaxed);
+    CHECK(residual_allocs == 0, "Repeated hot-path SparseMatrix::residual must perform exactly zero dynamic allocations");
+
+    // A. Insufficient scratch
+    auto small_scratch = sih26119::DenseVector::create(2, 0.0).value();
+    CHECK(y.set(0, 88.0).is_ok(), "set guard y");
+    CHECK(!mat.multiply(x, y, small_scratch).is_ok(), "Insufficient scratch multiply must fail");
+    CHECK(y[0] == 88.0, "y[0] must remain unchanged");
+
+    CHECK(r.set(0, 99.0).is_ok(), "set guard r");
+    CHECK(!mat.residual(b, x, r, small_scratch).is_ok(), "Insufficient scratch residual must fail");
+    CHECK(r[0] == 99.0, "r[0] must remain unchanged");
+
+    // B. Scratch alias x (multiply)
+    CHECK(!mat.multiply(x, y, x).is_ok(), "scratch alias x must fail");
+
+    // C. Scratch alias y (multiply)
+    CHECK(!mat.multiply(x, y, y).is_ok(), "scratch alias y must fail");
+
+    // D. x alias y (multiply)
+    const std::vector<sih26119::Triplet> sq_triplets = {{0, 0, 1.0}};
+    auto sq_mat = sih26119::SparseMatrix::from_triplets(2, 2, sq_triplets).value();
+    auto sq_v = sih26119::DenseVector::create(2, 1.0).value();
+    auto sq_sc = sih26119::DenseVector::create(2, 0.0).value();
+    CHECK(!sq_mat.multiply(sq_v, sq_v, sq_sc).is_ok(), "x alias y must fail");
+
+    // Strict residual aliasing tests:
+    // E. Residual scratch alias x
+    CHECK(!mat.residual(b, x, r, x).is_ok(), "residual scratch alias x must fail");
+
+    // F. Residual scratch alias r
+    CHECK(!mat.residual(b, x, r, r).is_ok(), "residual scratch alias r must fail");
+
+    // G. Residual input/output alias cases:
+    CHECK(!sq_mat.residual(sq_v, sq_v, r, sq_sc).is_ok(), "residual b alias x must fail");
+    CHECK(!sq_mat.residual(sq_v, x, sq_v, sq_sc).is_ok(), "residual b alias r must fail");
+    CHECK(!sq_mat.residual(sq_v, x, r, sq_v).is_ok(), "residual b alias scratch must fail");
+    CHECK(!sq_mat.residual(b, sq_v, sq_v, sq_sc).is_ok(), "residual x alias r must fail");
+
+    // J. Oversized scratch: extra entries beyond rows must remain untouched
+    auto big_scratch = sih26119::DenseVector::create(6, 0.0).value();
+    CHECK(big_scratch.set(3, 444.0).is_ok(), "set extra 3");
+    CHECK(big_scratch.set(4, 555.0).is_ok(), "set extra 4");
+    CHECK(big_scratch.set(5, 666.0).is_ok(), "set extra 5");
+
+    CHECK(mat.multiply(x, y, big_scratch).is_ok(), "SpMV with oversized scratch");
+    CHECK(big_scratch[3] == 444.0, "multiply: big_scratch[3] untouched");
+    CHECK(big_scratch[4] == 555.0, "multiply: big_scratch[4] untouched");
+    CHECK(big_scratch[5] == 666.0, "multiply: big_scratch[5] untouched");
+
+    CHECK(mat.residual(b, x, r, big_scratch).is_ok(), "Residual with oversized scratch");
+    CHECK(big_scratch[3] == 444.0, "residual: big_scratch[3] untouched");
+    CHECK(big_scratch[4] == 555.0, "residual: big_scratch[4] untouched");
+    CHECK(big_scratch[5] == 666.0, "residual: big_scratch[5] untouched");
 }
 
 } // namespace
@@ -268,6 +453,7 @@ int main() {
     test_invalid_input_and_aliasing();
     test_triplet_accumulation_overflow_rejection();
     test_transactional_sparse_multiply_and_residual_overflow();
+    test_hot_path_zero_allocation_and_workspace();
 
     if (g_failures > 0) {
         std::cerr << "\n[RESULT] FAILED with " << g_failures << " failure(s).\n";

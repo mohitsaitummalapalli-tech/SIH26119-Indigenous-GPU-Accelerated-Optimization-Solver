@@ -160,16 +160,25 @@ Result<Scalar> SparseMatrix::get(Index row, Index col) const noexcept {
     return kScalarZero;
 }
 
-Status SparseMatrix::multiply(const DenseVector& x, DenseVector& y) const noexcept {
+Status SparseMatrix::multiply(const DenseVector& x, DenseVector& y, DenseVector& scratch) const noexcept {
     if (x.size() != cols_) {
         return Status::error(StatusCode::InvalidArgument, "Dimension mismatch in SparseMatrix::multiply: x.size() != cols");
     }
     if (y.size() != rows_) {
         return Status::error(StatusCode::InvalidArgument, "Dimension mismatch in SparseMatrix::multiply: y.size() != rows");
     }
-    // Explicit aliasing check
+    if (scratch.size() < rows_) {
+        return Status::error(StatusCode::InvalidArgument, "Insufficient scratch workspace capacity in SparseMatrix::multiply: scratch.size() < rows");
+    }
+    // Strict aliasing checks: x, y, and scratch must all be distinct storage objects
     if (&x == &y || (x.size() > 0 && y.size() > 0 && x.data() == y.data())) {
         return Status::error(StatusCode::InvalidArgument, "x and y cannot alias in SparseMatrix::multiply");
+    }
+    if (&x == &scratch || (x.size() > 0 && scratch.size() > 0 && x.data() == scratch.data())) {
+        return Status::error(StatusCode::InvalidArgument, "x and scratch cannot alias in SparseMatrix::multiply");
+    }
+    if (&y == &scratch || (y.size() > 0 && scratch.size() > 0 && y.data() == scratch.data())) {
+        return Status::error(StatusCode::InvalidArgument, "y and scratch cannot alias in SparseMatrix::multiply");
     }
 
     if (rows_ == 0) {
@@ -177,7 +186,7 @@ Status SparseMatrix::multiply(const DenseVector& x, DenseVector& y) const noexce
     }
 
     const Scalar* x_data = x.data();
-    std::vector<Scalar> temp(static_cast<std::size_t>(rows_), kScalarZero);
+    Scalar* scratch_data = scratch.data();
 
     for (Dimension i = 0; i < rows_; ++i) {
         const NonzeroCount start = row_ptr_[i];
@@ -191,15 +200,24 @@ Status SparseMatrix::multiply(const DenseVector& x, DenseVector& y) const noexce
             return Status::error(StatusCode::InvalidArgument,
                 "SparseMatrix::multiply produced non-finite result (arithmetic overflow)");
         }
-        temp[i] = sum;
+        scratch_data[i] = sum;
     }
 
     Scalar* y_data = y.data();
     for (Dimension i = 0; i < rows_; ++i) {
-        y_data[i] = temp[i];
+        y_data[i] = scratch_data[i];
     }
 
     return Status::ok();
+}
+
+Status SparseMatrix::multiply(const DenseVector& x, DenseVector& y) const {
+    auto scratch_res = DenseVector::create(rows_, kScalarZero);
+    if (!scratch_res.ok()) {
+        return scratch_res.status();
+    }
+    DenseVector scratch = std::move(scratch_res.value());
+    return multiply(x, y, scratch);
 }
 
 Result<DenseVector> SparseMatrix::multiply(const DenseVector& x) const {
@@ -215,7 +233,7 @@ Result<DenseVector> SparseMatrix::multiply(const DenseVector& x) const {
     return y;
 }
 
-Status SparseMatrix::residual(const DenseVector& b, const DenseVector& x, DenseVector& r) const noexcept {
+Status SparseMatrix::residual(const DenseVector& b, const DenseVector& x, DenseVector& r, DenseVector& scratch) const noexcept {
     if (b.size() != rows_) {
         return Status::error(StatusCode::InvalidArgument, "Dimension mismatch in SparseMatrix::residual: b.size() != rows");
     }
@@ -225,9 +243,28 @@ Status SparseMatrix::residual(const DenseVector& b, const DenseVector& x, DenseV
     if (r.size() != rows_) {
         return Status::error(StatusCode::InvalidArgument, "Dimension mismatch in SparseMatrix::residual: r.size() != rows");
     }
-    // Explicit aliasing check: r cannot alias x
-    if (&r == &x || (r.size() > 0 && x.size() > 0 && r.data() == x.data())) {
+    if (scratch.size() < rows_) {
+        return Status::error(StatusCode::InvalidArgument, "Insufficient scratch workspace capacity in SparseMatrix::residual: scratch.size() < rows");
+    }
+
+    // Strict deterministic aliasing contract: b, x, r, scratch must all be distinct storage objects
+    if (&b == &x || (b.size() > 0 && x.size() > 0 && b.data() == x.data())) {
+        return Status::error(StatusCode::InvalidArgument, "b and x cannot alias in SparseMatrix::residual");
+    }
+    if (&b == &r || (b.size() > 0 && r.size() > 0 && b.data() == r.data())) {
+        return Status::error(StatusCode::InvalidArgument, "b and r cannot alias in SparseMatrix::residual");
+    }
+    if (&b == &scratch || (b.size() > 0 && scratch.size() > 0 && b.data() == scratch.data())) {
+        return Status::error(StatusCode::InvalidArgument, "b and scratch cannot alias in SparseMatrix::residual");
+    }
+    if (&x == &r || (x.size() > 0 && r.size() > 0 && x.data() == r.data())) {
         return Status::error(StatusCode::InvalidArgument, "x and r cannot alias in SparseMatrix::residual");
+    }
+    if (&x == &scratch || (x.size() > 0 && scratch.size() > 0 && x.data() == scratch.data())) {
+        return Status::error(StatusCode::InvalidArgument, "x and scratch cannot alias in SparseMatrix::residual");
+    }
+    if (&r == &scratch || (r.size() > 0 && scratch.size() > 0 && r.data() == scratch.data())) {
+        return Status::error(StatusCode::InvalidArgument, "r and scratch cannot alias in SparseMatrix::residual");
     }
 
     if (rows_ == 0) {
@@ -236,7 +273,7 @@ Status SparseMatrix::residual(const DenseVector& b, const DenseVector& x, DenseV
 
     const Scalar* b_data = b.data();
     const Scalar* x_data = x.data();
-    std::vector<Scalar> temp(static_cast<std::size_t>(rows_), kScalarZero);
+    Scalar* scratch_data = scratch.data();
 
     for (Dimension i = 0; i < rows_; ++i) {
         const NonzeroCount start = row_ptr_[i];
@@ -251,15 +288,24 @@ Status SparseMatrix::residual(const DenseVector& b, const DenseVector& x, DenseV
             return Status::error(StatusCode::InvalidArgument,
                 "SparseMatrix::residual produced non-finite residual (arithmetic overflow)");
         }
-        temp[i] = res_val;
+        scratch_data[i] = res_val;
     }
 
     Scalar* r_data = r.data();
     for (Dimension i = 0; i < rows_; ++i) {
-        r_data[i] = temp[i];
+        r_data[i] = scratch_data[i];
     }
 
     return Status::ok();
+}
+
+Status SparseMatrix::residual(const DenseVector& b, const DenseVector& x, DenseVector& r) const {
+    auto scratch_res = DenseVector::create(rows_, kScalarZero);
+    if (!scratch_res.ok()) {
+        return scratch_res.status();
+    }
+    DenseVector scratch = std::move(scratch_res.value());
+    return residual(b, x, r, scratch);
 }
 
 Result<DenseVector> SparseMatrix::residual(const DenseVector& b, const DenseVector& x) const {

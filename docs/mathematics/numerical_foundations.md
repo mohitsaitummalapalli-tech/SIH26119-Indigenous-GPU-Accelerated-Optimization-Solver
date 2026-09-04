@@ -135,11 +135,40 @@ The numerical layer strictly distinguishes between two classes of non-finite con
 1. **Invalid Non-Finite Input**: Checked APIs reject vectors, scalars, or matrices containing `NaN`, `+Inf`, or `-Inf` immediately upon entry with `StatusCode::InvalidArgument`.
 2. **Finite Input Producing Non-Finite Output via Overflow**: When valid finite inputs through arithmetic operations (such as `scale`, `axpy`, `dot`, `DenseMatrix::multiply`, `SparseMatrix::multiply`, `SparseMatrix::residual`, or CSR duplicate triplet accumulation) produce an infinite or NaN result due to floating-point overflow, the operation detects the condition and returns an explicit `StatusCode::InvalidArgument`.
 
-#### Transactional State Consistency Contract:
+#### Transactional State Consistency & Workspace Allocation Contract:
 No operation is permitted to leave a numerical object in an undocumented, partially modified state upon encountering arithmetic overflow:
 - `DenseVector::scale(alpha)`: Validates that all scaled elements remain finite prior to mutating state. If an overflow occurs, `storage_` is left completely unmodified.
 - `DenseVector::axpy(alpha, x)`: Validates that all resulting elements $y_i = \alpha x_i + y_i$ remain finite prior to mutating state. If an overflow occurs, $y$ is left completely unmodified.
-- `DenseMatrix::multiply(x, y)`: Computes the product into an intermediate buffer and verifies finiteness before committing to $y$. If an overflow occurs, $y$ is left unmodified.
-- `SparseMatrix::multiply(x, y)`: Computes the SpMV into an intermediate buffer and verifies finiteness before committing to $y$. If an overflow occurs, $y$ is left unmodified.
-- `SparseMatrix::residual(b, x, r)`: Computes the residual into an intermediate buffer and verifies finiteness before committing to $r$. If an overflow occurs, $r$ is left unmodified.
+- `DenseMatrix::multiply(x, y, scratch)`: Computes the product into caller-owned `scratch` and verifies finiteness before committing to $y$. If an overflow occurs, $y$ is left unmodified.
+- `SparseMatrix::multiply(x, y, scratch)`: Computes the SpMV into caller-owned `scratch` and verifies finiteness before committing to $y$. If an overflow occurs, $y$ is left unmodified.
+- `SparseMatrix::residual(b, x, r, scratch)`: Computes the residual into caller-owned `scratch` and verifies finiteness before committing to $r$. If an overflow occurs, $r$ is left unmodified.
 - `SparseMatrix::from_triplets`: During duplicate coordinate accumulation $\sum v$, each addition is verified immediately. If an accumulated coordinate overflows to $\pm\infty$, construction fails immediately with `StatusCode::InvalidArgument`.
+
+#### 3.4 Hot-Path Allocation Contract & Reusable Workspace Strategy
+To guarantee predictable real-time execution in iterative optimization algorithms, hot-path matrix-vector products and residual evaluations enforce a strict zero-heap-allocation contract:
+
+1. **Workspace Ownership**: The scratch workspace `DenseVector& scratch` is allocated once and owned by the caller. It is passed into repeated hot-path calls across iterative solver loops without reallocating.
+2. **Minimum Capacity & Modified Range**:
+   - The workspace requires $\text{scratch.size()} \ge \text{rows}()$.
+   - Insufficient scratch capacity ($\text{scratch.size()} < \text{rows}()$) immediately returns `StatusCode::InvalidArgument` prior to modifying destination state.
+   - Operations strictly modify only elements in the range $[0, \text{rows}())$. Any extra capacity in $[\text{rows}(), \text{scratch.size()})$ is guaranteed to remain untouched.
+3. **Strict Aliasing Rules**:
+   - `DenseMatrix::multiply(x, y, scratch)`: `x`, `y`, and `scratch` must be distinct storage objects (no pairwise aliasing).
+   - `SparseMatrix::multiply(x, y, scratch)`: `x`, `y`, and `scratch` must be distinct storage objects.
+   - `SparseMatrix::residual(b, x, r, scratch)`: `b`, `x`, `r`, and `scratch` must all be pairwise distinct storage objects.
+   - Detected aliasing immediately returns `StatusCode::InvalidArgument`.
+4. **Allocation Guarantees**:
+   - **Hot-Path Overloads**:
+     - `DenseMatrix::multiply(x, y, scratch) noexcept`
+     - `SparseMatrix::multiply(x, y, scratch) noexcept`
+     - `SparseMatrix::residual(b, x, r, scratch) noexcept`
+     Perform **zero** dynamic heap allocations (`std::vector` construction/resize/push_back, `new`, `malloc`, etc.).
+   - **Convenience Overloads**:
+     - `DenseMatrix::multiply(x, y)` / `multiply(x)`
+     - `SparseMatrix::multiply(x, y)` / `multiply(x)`
+     - `SparseMatrix::residual(b, x, r)` / `residual(b, x)`
+     Allocate temporary workspace vectors internally for ease-of-use in non-performance-critical call sites.
+5. **Transactional Rollback**:
+   - Computations accumulate strictly in `scratch`.
+   - On arithmetic overflow or non-finite output, the operation immediately aborts with `StatusCode::InvalidArgument`, leaving destination (`y` or `r`) completely unmodified. `scratch` may contain partial intermediate calculations.
+   - Destination memory is updated if and only if all output values $[0, \text{rows}())$ are validated as finite.

@@ -48,24 +48,46 @@ public:
     /// Verifies all mathematical CSR invariants.
     [[nodiscard]] Status validate_invariants() const noexcept;
 
-    /// Sparse matrix-vector product in-place: y = Ax.
-    /// Requirements:
-    /// - cols() == x.size()
-    /// - rows() == y.size()
-    /// - x and y must NOT alias (&x != &y and x.data() != y.data()).
-    [[nodiscard]] Status multiply(const DenseVector& x, DenseVector& y) const noexcept;
+    /// Hot-path zero-allocation sparse matrix-vector product in-place: y = Ax using caller-owned scratch workspace.
+    ///
+    /// Contract:
+    /// - Zero dynamic heap allocations during execution.
+    /// - Dimensions: cols() == x.size(), rows() == y.size().
+    /// - Scratch capacity: scratch.size() >= rows(). Only elements [0, rows()) may be modified.
+    ///   Extra entries [rows(), scratch.size()) remain untouched.
+    /// - Aliasing: x, y, and scratch must all be distinct storage objects (no pairwise aliasing).
+    /// - Transactional guarantee: y is modified if and only if all outputs [0, rows()) are finite.
+    ///   On arithmetic overflow or error, returns StatusCode::InvalidArgument and y remains strictly unmodified.
+    ///   (scratch may contain intermediate values on failure).
+    [[nodiscard]] Status multiply(const DenseVector& x, DenseVector& y, DenseVector& scratch) const noexcept;
 
-    /// Sparse matrix-vector product allocating a new DenseVector: returns y = Ax.
+    /// Convenience in-place SpMV: y = Ax.
+    /// Allocates temporary scratch workspace internally and forwards to the 3-argument overload.
+    [[nodiscard]] Status multiply(const DenseVector& x, DenseVector& y) const;
+
+    /// Convenience value-returning SpMV: returns y = Ax.
+    /// Allocates destination vector and temporary scratch workspace.
     [[nodiscard]] Result<DenseVector> multiply(const DenseVector& x) const;
 
-    /// Computes residual in-place: r = b - Ax.
-    /// Requirements:
-    /// - cols() == x.size()
-    /// - rows() == b.size() == r.size()
-    /// - x and r must NOT alias (&x != &r and x.data() != r.data()).
-    [[nodiscard]] Status residual(const DenseVector& b, const DenseVector& x, DenseVector& r) const noexcept;
+    /// Hot-path zero-allocation residual in-place: r = b - Ax using caller-owned scratch workspace.
+    ///
+    /// Contract:
+    /// - Zero dynamic heap allocations during execution.
+    /// - Dimensions: cols() == x.size(), rows() == b.size() == r.size().
+    /// - Scratch capacity: scratch.size() >= rows(). Only elements [0, rows()) may be modified.
+    ///   Extra entries [rows(), scratch.size()) remain untouched.
+    /// - Aliasing: b, x, r, and scratch must all be distinct storage objects (strict pairwise distinctness).
+    /// - Transactional guarantee: r is modified if and only if all residuals [0, rows()) are finite.
+    ///   On arithmetic overflow or error, returns StatusCode::InvalidArgument and r remains strictly unmodified.
+    ///   (scratch may contain intermediate values on failure).
+    [[nodiscard]] Status residual(const DenseVector& b, const DenseVector& x, DenseVector& r, DenseVector& scratch) const noexcept;
 
-    /// Computes residual allocating a new DenseVector: returns r = b - Ax.
+    /// Convenience in-place residual: r = b - Ax.
+    /// Allocates temporary scratch workspace internally and forwards to the 4-argument overload.
+    [[nodiscard]] Status residual(const DenseVector& b, const DenseVector& x, DenseVector& r) const;
+
+    /// Convenience value-returning residual: returns r = b - Ax.
+    /// Allocates destination vector and temporary scratch workspace.
     [[nodiscard]] Result<DenseVector> residual(const DenseVector& b, const DenseVector& x) const;
 
 private:
