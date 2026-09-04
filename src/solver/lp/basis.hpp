@@ -90,6 +90,13 @@ public:
     }
 
     /// Access the full list of nonbasic column indices (size n - m).
+    /// ORDERING CONTRACT:
+    /// 1. Upon initial construction in Basis::create(), nonbasic columns are ordered
+    ///    in strictly ascending numerical order: {j in [0, n) | j is nonbasic}.
+    /// 2. Upon replace_basic_variable(entering_col, leaving_row), the entering column
+    ///    vacates its position in nonbasic_variables(), and the leaving column is placed
+    ///    directly into that vacated slot. This guarantees O(1) swap without re-sorting.
+    ///    The ordering is completely deterministic across all platforms.
     [[nodiscard]] const std::vector<Index>& nonbasic_variables() const noexcept {
         return nonbasic_vars_;
     }

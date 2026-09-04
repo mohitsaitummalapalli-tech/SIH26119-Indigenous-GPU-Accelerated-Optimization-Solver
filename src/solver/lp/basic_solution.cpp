@@ -85,6 +85,10 @@ Status BasicSolution::check_primal_feasibility(
             "Dimension mismatch during primal feasibility verification");
     }
 
+    auto x_res = DenseVector::create(A.cols());
+    if (!x_res.is_ok()) return x_res.status();
+    DenseVector x_workspace = std::move(x_res.value());
+
     auto r_res = DenseVector::create(A.rows());
     if (!r_res.is_ok()) return r_res.status();
     DenseVector residual_out = std::move(r_res.value());
@@ -93,7 +97,7 @@ Status BasicSolution::check_primal_feasibility(
     if (!s_res.is_ok()) return s_res.status();
     DenseVector residual_scratch = std::move(s_res.value());
 
-    return check_primal_feasibility(A, b, sol, residual_scratch, residual_out, feas_tol);
+    return check_primal_feasibility(A, b, sol, x_workspace, residual_scratch, residual_out, feas_tol);
 }
 
 Status BasicSolution::check_primal_feasibility(
@@ -104,21 +108,84 @@ Status BasicSolution::check_primal_feasibility(
     DenseVector& residual_out,
     Scalar feas_tol)
 {
+    auto x_res = DenseVector::create(A.cols());
+    if (!x_res.is_ok()) return x_res.status();
+    DenseVector x_workspace = std::move(x_res.value());
+
+    return check_primal_feasibility(A, b, sol, x_workspace, residual_scratch, residual_out, feas_tol);
+}
+
+Status BasicSolution::check_primal_feasibility(
+    const SparseMatrix& A,
+    const DenseVector& b,
+    const BasicSolution& sol,
+    DenseVector& x_workspace,
+    DenseVector& residual_scratch,
+    DenseVector& residual_out,
+    Scalar feas_tol)
+{
     const Dimension m = A.rows();
     const Dimension n = A.cols();
 
+    if (!std::isfinite(feas_tol) || feas_tol < 0.0) {
+        return Status::error(StatusCode::InvalidArgument,
+            "feas_tol must be finite and non-negative");
+    }
+
+    // 1. Dimension validation
     if (m != b.size() || m != sol.num_rows() || n != sol.num_cols()) {
         return Status::error(StatusCode::InvalidArgument,
             "Dimension mismatch in check_primal_feasibility");
     }
-    if (residual_scratch.size() < m || residual_out.size() < m) {
+    if (x_workspace.size() != n) {
         return Status::error(StatusCode::InvalidArgument,
-            "Residual workspace buffers smaller than matrix rows");
+            "x_workspace.size() != A.cols()");
+    }
+    if (residual_scratch.size() < m) {
+        return Status::error(StatusCode::InvalidArgument,
+            "residual_scratch.size() < A.rows()");
+    }
+    if (residual_out.size() != m) {
+        return Status::error(StatusCode::InvalidArgument,
+            "residual_out.size() != A.rows()");
     }
 
-    // 1. Non-negativity check: x_B[i] >= -feas_tol
+    // 2. Strict pairwise aliasing contract (Phase 2 compliance)
+    if (&b == &x_workspace || (b.size() > 0 && x_workspace.size() > 0 && b.data() == x_workspace.data())) {
+        return Status::error(StatusCode::InvalidArgument, "b and x_workspace cannot alias");
+    }
+    if (&b == &residual_scratch || (b.size() > 0 && residual_scratch.size() > 0 && b.data() == residual_scratch.data())) {
+        return Status::error(StatusCode::InvalidArgument, "b and residual_scratch cannot alias");
+    }
+    if (&b == &residual_out || (b.size() > 0 && residual_out.size() > 0 && b.data() == residual_out.data())) {
+        return Status::error(StatusCode::InvalidArgument, "b and residual_out cannot alias");
+    }
+    if (&x_workspace == &residual_scratch || (x_workspace.size() > 0 && residual_scratch.size() > 0 && x_workspace.data() == residual_scratch.data())) {
+        return Status::error(StatusCode::InvalidArgument, "x_workspace and residual_scratch cannot alias");
+    }
+    if (&x_workspace == &residual_out || (x_workspace.size() > 0 && residual_out.size() > 0 && x_workspace.data() == residual_out.data())) {
+        return Status::error(StatusCode::InvalidArgument, "x_workspace and residual_out cannot alias");
+    }
+    if (&residual_scratch == &residual_out || (residual_scratch.size() > 0 && residual_out.size() > 0 && residual_scratch.data() == residual_out.data())) {
+        return Status::error(StatusCode::InvalidArgument, "residual_scratch and residual_out cannot alias");
+    }
+
+    // 3. Reject non-finite data in b
+    for (Dimension i = 0; i < m; ++i) {
+        Scalar b_val = b.at(i).value();
+        if (!std::isfinite(b_val)) {
+            return Status::error(StatusCode::InvalidArgument,
+                "Non-finite value in RHS vector b");
+        }
+    }
+
+    // 4. Check primal non-negativity: x_B[i] >= -feas_tol and finite
     for (Dimension i = 0; i < m; ++i) {
         Scalar val = sol.x_B_.at(i).value();
+        if (!std::isfinite(val)) {
+            return Status::error(StatusCode::InvalidArgument,
+                "Non-finite value in basic solution coordinate");
+        }
         if (val < -feas_tol) {
             return Status::error(StatusCode::InvalidBounds,
                 "Basic solution violates non-negativity: coordinate " + std::to_string(i) +
@@ -126,34 +193,30 @@ Status BasicSolution::check_primal_feasibility(
         }
     }
 
-    // 2. Compute residual directly: r = b - A x
-    // Since x_N = 0, for each row i:
-    // (A x)_i = sum_{nz in row i} A.values[nz] * x[A.col[nz]]
-    // Where x[col] is x_B[row_of_col] if col is basic, and 0 if col is nonbasic.
-    // Build a temporary fast column lookup from basic_vars
-    std::vector<Scalar> col_values(static_cast<std::size_t>(n), 0.0);
-    for (Dimension i = 0; i < m; ++i) {
-        col_values[sol.basic_vars_[i]] = sol.x_B_.at(i).value();
+    // 5. If m == 0, system has no constraints; vacuously feasible
+    if (m == 0) {
+        return Status::ok();
     }
 
+    // 6. Zero-allocation expansion into x_workspace
+    auto exp_st = sol.expand_full_primal(x_workspace);
+    if (!exp_st.is_ok()) {
+        return exp_st;
+    }
+
+    // 7. Compute residual r = b - Ax via Phase 2 authoritative SparseMatrix::residual
+    auto res_st = A.residual(b, x_workspace, residual_out, residual_scratch);
+    if (!res_st.is_ok()) {
+        return res_st;
+    }
+
+    // 8. Verify max infinity norm of residual
     Scalar max_residual = 0.0;
     for (Dimension i = 0; i < m; ++i) {
-        Scalar ax_i = 0.0;
-        const NonzeroCount r_start = A.row_ptr()[i];
-        const NonzeroCount r_end = A.row_ptr()[static_cast<std::size_t>(i) + 1];
-
-        for (NonzeroCount nz = r_start; nz < r_end; ++nz) {
-            const Index col = A.col_idx()[static_cast<std::size_t>(nz)];
-            const Scalar a_val = A.values()[static_cast<std::size_t>(nz)];
-            ax_i += a_val * col_values[col];
+        Scalar r_i = std::abs(residual_out.at(i).value());
+        if (r_i > max_residual) {
+            max_residual = r_i;
         }
-
-        const Scalar b_i = b.at(i).value();
-        const Scalar res_i = b_i - ax_i;
-        auto st_set = residual_out.set(i, res_i);
-        if (!st_set.is_ok()) return st_set;
-
-        max_residual = std::max(max_residual, std::abs(res_i));
     }
 
     if (max_residual > feas_tol) {

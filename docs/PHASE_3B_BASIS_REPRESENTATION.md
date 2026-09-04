@@ -72,6 +72,12 @@ class Basis {
 4. **`basic_variable(Index row) noexcept`**: $O(1)$ array index in `basic_vars_`. Zero allocations.
 5. **`basic_variables()` & `nonbasic_variables()`**: $O(1)$ const reference return. Zero allocations.
 
+### Nonbasic Column Ordering Contract
+The list returned by `nonbasic_variables()` adheres to a strict deterministic ordering contract:
+1. **Initial Construction (`Basis::create`):** Nonbasic columns are stored in strictly ascending numerical order:
+   $$\{j \in [0, n) \mid j \text{ is nonbasic}\}$$
+2. **Transactional Replacement (`replace_basic_variable`):** When entering column $j_{\text{enter}}$ enters the basis, it vacates slot $p = \text{var\_to\_nonbasic\_pos\_}[j_{\text{enter}}]$ in `nonbasic_vars_`. The leaving column $j_{\text{leave}}$ is placed directly into slot $p$. This guarantees $O(1)$ constant-time update without dynamic allocations or vector re-sorting, ensuring 100% deterministic ordering across all compilers and execution runs.
+
 ---
 
 ## 4. Transactional Basis Replacement & Mutation Semantics
@@ -122,11 +128,25 @@ The [`BasicSolution`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%
 ### Independent Primal Feasibility Verification
 `BasicSolution::check_primal_feasibility` verifies:
 1. Dimension compatibility between $A$ ($m \times n$), $b$ ($m$), and solution ($m$ basic, $n$ total).
-2. Primal non-negativity:
+2. Data validity: Rejection of NaN / non-finite values in $b$ and $x_B$.
+3. Primal non-negativity:
    $$x_{B(i)} \ge -\tau_{\text{feas}}, \quad \forall i \in \{0, \dots, m - 1\}$$
-3. Constraint residual:
+4. Constraint residual:
    $$\|A x - b\|_\infty \le \tau_{\text{feas}}$$
-   computed using SpMV without materializing any dense matrices or invoking an optimization solver.
+   computed using Phase 2's authoritative `SparseMatrix::residual` without materializing dense matrices or invoking an optimization solver.
+5. **Zero-Allocation Hot-Path Contract:**
+   The 7-argument overload:
+   ```cpp
+   Status check_primal_feasibility(
+       const SparseMatrix& A,
+       const DenseVector& b,
+       const BasicSolution& sol,
+       DenseVector& x_workspace,
+       DenseVector& residual_scratch,
+       DenseVector& residual_out,
+       Scalar feas_tol = 1e-7);
+   ```
+   operates with **zero heap allocations** and strictly enforces Phase 2 pairwise distinctness/aliasing across `b`, `x_workspace`, `residual_scratch`, and `residual_out`.
 
 ---
 
@@ -141,7 +161,9 @@ $$B[:, k] = A[:, B(k)], \quad k \in \{0, \dots, m - 1\}$$
    `BasisMatrixView` contains only `const SparseMatrix& A_` and `const Basis& basis_`. It never copies, allocates, or duplicates the matrix coefficients of $B$.
 2. **Explicit Lifetime Invariant:**
    The caller must guarantee that both the referenced `SparseMatrix` $A$ and `Basis` object outlive the `BasisMatrixView` instance.
-3. **Phase 3C Integration Boundary:**
+3. **Dynamic View Synchronization:**
+   Because `BasisMatrixView` references `Basis`, any successful transactional pivot on `Basis` is immediately and automatically reflected in subsequent queries on the existing view without requiring view re-instantiation.
+4. **Phase 3C Integration Boundary:**
    Column retrieval (`original_column_index(k)`) and entry inspection (`get(row, k)`) map directly to $A$'s CSR structure, forming the foundation for Phase 3C LU factorization without premature solver coupling.
 
 ---
@@ -170,9 +192,14 @@ The Phase 3B implementation is validated by a rigorous test suite in [`tests/uni
 | `TEST-BASIS-16` | BasisMatrixView| View dimensions ($m \times m$), column mapping, entry extraction | **PASSED** |
 | `TEST-BASIS-17` | Stress / Cycle | 5 sequential pivots on $3 \times 6$ system, version tracking, state consistency | **PASSED** |
 | `TEST-BASIS-18` | Scalability | Large basis ($m=50, n=200$), full partition and bijectivity audit | **PASSED** |
+| `TEST-BASIS-19` | Boundary Edge | Square basis $m = n$ (all columns basic, empty nonbasic set) | **PASSED** |
+| `TEST-BASIS-20` | Boundary Edge | Degenerate $m = 0, n = 0$ basis system validation | **PASSED** |
+| `TEST-BASIS-21` | Transactional | Comprehensive state immutability on failed replacement (every field verified) | **PASSED** |
+| `TEST-BASIS-22` | Dynamic View | BasisMatrixView dynamic synchronization across Basis pivot without re-creation | **PASSED** |
+| `TEST-BASIS-23` | Workspace/Alias| Zero-allocation feasibility overload, pairwise aliasing rejection, NaN rejection | **PASSED** |
 | `TEST-PROP-01` | Property Test | 30 independent randomized trials with 5 random pivots each against independent `std::unordered_set` oracle | **PASSED** |
 
 ### Complete Test Suite Execution
-- **Unit Test Execution:** 100% pass (0 failures across all 18 test fixtures and 30 property trials).
+- **Unit Test Execution:** 100% pass (0 failures across all 23 test fixtures and 30 property trials).
 - **Full CTest Suite:** 11/11 test targets passed (Phase 0, Phase 1, Phase 2, Phase 3A, and Phase 3B).
 - **Compiler Diagnostics:** 0 warnings under `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion`.

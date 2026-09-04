@@ -78,9 +78,12 @@ public:
      *
      * Verifies:
      * - Dimension consistency between A, b, and the solution.
+     * - Rejection of NaN / non-finite values in b or x_B.
      * - Non-negativity: x_B[i] >= -feas_tol for all i.
      * - Equality residual: ||A x - b||_inf <= feas_tol.
+     * - Handles m=0 and n=0 correctly.
      *
+     * Allocation behavior: Allocates internal workspaces (x_workspace, residual_scratch, residual_out).
      * Does NOT invoke a solver.
      */
     [[nodiscard]] static Status check_primal_feasibility(
@@ -92,9 +95,25 @@ public:
     /**
      * @brief Zero-allocation overload of check_primal_feasibility using preallocated workspaces.
      *
-     * Preconditions:
-     * - residual_scratch.size() == A.rows()
+     * Obeying Phase 2 aliasing contracts:
+     * - x_workspace, residual_scratch, residual_out, and b must be pairwise distinct storage objects.
+     * - x_workspace.size() == A.cols()
+     * - residual_scratch.size() >= A.rows()
      * - residual_out.size() == A.rows()
+     * - Performs ZERO dynamic heap allocations.
+     */
+    [[nodiscard]] static Status check_primal_feasibility(
+        const SparseMatrix& A,
+        const DenseVector& b,
+        const BasicSolution& sol,
+        DenseVector& x_workspace,
+        DenseVector& residual_scratch,
+        DenseVector& residual_out,
+        Scalar feas_tol = 1e-7);
+
+    /**
+     * @brief Compatibility overload accepting residual scratch and output buffers.
+     * Allocates temporary x_workspace internally.
      */
     [[nodiscard]] static Status check_primal_feasibility(
         const SparseMatrix& A,

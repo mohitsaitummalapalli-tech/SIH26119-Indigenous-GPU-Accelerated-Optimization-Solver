@@ -319,6 +319,130 @@ int main() {
         check(bijection_ok, "TEST-BASIS-18: Bijective mapping verified across all 50 rows");
     }
 
+    // TEST-BASIS-19: Square basis boundary condition m = n
+    {
+        // m = 4, n = 4, B = [2, 0, 3, 1]
+        auto b_res = Basis::create(4, 4, {2, 0, 3, 1});
+        check(b_res.is_ok(), "TEST-BASIS-19: Square basis (m=n) construction succeeds");
+        const auto& b = b_res.value();
+        check(b.num_rows() == 4 && b.num_cols() == 4, "TEST-BASIS-19: Dimensions m=4, n=4");
+        check(b.nonbasic_variables().empty(), "TEST-BASIS-19: Nonbasic set is strictly empty for m=n");
+        for (Index j = 0; j < 4; ++j) {
+            check(b.is_basic(j) && !b.is_nonbasic(j), "TEST-BASIS-19: All columns are basic");
+        }
+    }
+
+    // TEST-BASIS-20: Degenerate boundary condition m = 0, n = 0
+    {
+        auto b_res = Basis::create(0, 0, {});
+        check(b_res.is_ok(), "TEST-BASIS-20: m=0, n=0 basis succeeds");
+        const auto& b = b_res.value();
+        check(b.num_rows() == 0 && b.num_cols() == 0, "TEST-BASIS-20: Dimensions 0x0");
+        check(b.basic_variables().empty() && b.nonbasic_variables().empty(), "TEST-BASIS-20: Both sets empty");
+    }
+
+    // TEST-BASIS-21: Comprehensive state immutability on failed replacement
+    {
+        // m = 3, n = 5, B = [0, 2, 4], N = [1, 3]
+        auto b = Basis::create(3, 5, {0, 2, 4}).value();
+        const auto orig_basic = b.basic_variables();
+        const auto orig_nonbasic = b.nonbasic_variables();
+        const uint64_t orig_ver = b.version();
+
+        // Attempt invalid replacement: entering variable 2 is already basic!
+        auto st = b.replace_basic_variable(2, 0);
+        check(!st.is_ok(), "TEST-BASIS-21: Rejects basic variable as entering");
+        check(b.version() == orig_ver, "TEST-BASIS-21: Version unchanged on failure");
+        check(b.basic_variables() == orig_basic, "TEST-BASIS-21: Basic list unchanged");
+        check(b.nonbasic_variables() == orig_nonbasic, "TEST-BASIS-21: Nonbasic list unchanged");
+        for (Index j = 0; j < 5; ++j) {
+            check(b.is_basic(j) == (j == 0 || j == 2 || j == 4), "TEST-BASIS-21: Basic status unchanged");
+            check(b.is_nonbasic(j) == (j == 1 || j == 3), "TEST-BASIS-21: Nonbasic status unchanged");
+        }
+    }
+
+    // TEST-BASIS-22: Dynamic view behavior of BasisMatrixView after replacement
+    {
+        // A is 2 x 4
+        // row 0: [10, 20, 30, 40]
+        // row 1: [50, 60, 70, 80]
+        // initial basis: B = [3, 1] (row 0 -> col 3, row 1 -> col 1)
+        auto b = Basis::create(2, 4, {3, 1}).value();
+        std::vector<Triplet> trips = {
+            {0, 0, 10.0}, {0, 1, 20.0}, {0, 2, 30.0}, {0, 3, 40.0},
+            {1, 0, 50.0}, {1, 1, 60.0}, {1, 2, 70.0}, {1, 3, 80.0}
+        };
+        auto A = SparseMatrix::from_triplets(2, 4, trips).value();
+
+        BasisMatrixView view(A, b);
+        check(view.original_column_index(0).value() == 3, "TEST-BASIS-22: View col 0 is col 3 initially");
+        check(approx_eq(view.get(0, 0).value(), 40.0), "TEST-BASIS-22: B(0,0) is 40.0");
+
+        // Pivot: entering col 0, leaving row 0 (so B becomes [0, 1])
+        auto rep_st = b.replace_basic_variable(0, 0);
+        check(rep_st.is_ok(), "TEST-BASIS-22: Pivot succeeds");
+
+        // The view MUST dynamically reflect the updated basis without re-instantiation
+        check(view.original_column_index(0).value() == 0, "TEST-BASIS-22: View col 0 dynamically updated to col 0");
+        check(approx_eq(view.get(0, 0).value(), 10.0), "TEST-BASIS-22: B(0,0) dynamically updated to 10.0");
+        check(view.original_column_index(1).value() == 1, "TEST-BASIS-22: View col 1 unchanged");
+    }
+
+    // TEST-BASIS-23: Zero-allocation workspace feasibility and aliasing rejection
+    {
+        // 2 x 3 system:
+        // x_0 + 2*x_1 + 3*x_2 = 14
+        // 2*x_0 + x_1 + 4*x_2 = 13
+        // Basics: B = [0, 1], Nonbasic: [2]
+        // Solution: x_B = [4, 5], x_2 = 0
+        // Ax: 4 + 10 = 14, 8 + 5 = 13
+        auto b_basis = Basis::create(2, 3, {0, 1}).value();
+        std::vector<Triplet> trips = {
+            {0, 0, 1.0}, {0, 1, 2.0}, {0, 2, 3.0},
+            {1, 0, 2.0}, {1, 1, 1.0}, {1, 2, 4.0}
+        };
+        auto A = SparseMatrix::from_triplets(2, 3, trips).value();
+
+        auto b_vec = DenseVector::create(2).value();
+        set_vec(b_vec, 0, 14.0);
+        set_vec(b_vec, 1, 13.0);
+
+        auto x_B = DenseVector::create(2).value();
+        set_vec(x_B, 0, 4.0);
+        set_vec(x_B, 1, 5.0);
+
+        auto sol = BasicSolution::create(b_basis, std::move(x_B)).value();
+
+        auto x_work = DenseVector::create(3).value();
+        auto res_scratch = DenseVector::create(2).value();
+        auto res_out = DenseVector::create(2).value();
+
+        // Zero-allocation overload execution
+        auto st = BasicSolution::check_primal_feasibility(A, b_vec, sol, x_work, res_scratch, res_out, 1e-7);
+        check(st.is_ok(), "TEST-BASIS-23: Zero-allocation feasibility check passes");
+
+        // Aliasing rejection: pass b_vec as residual_out
+        auto alias_st = BasicSolution::check_primal_feasibility(A, b_vec, sol, x_work, res_scratch, b_vec, 1e-7);
+        check(!alias_st.is_ok() && alias_st.code() == StatusCode::InvalidArgument,
+              "TEST-BASIS-23: Rejects aliasing between b and residual_out");
+
+        // Invalid tolerance rejection: negative feas_tol
+        auto neg_tol_st = BasicSolution::check_primal_feasibility(A, b_vec, sol, x_work, res_scratch, res_out, -1.0);
+        check(!neg_tol_st.is_ok() && neg_tol_st.code() == StatusCode::InvalidArgument,
+              "TEST-BASIS-23: Rejects negative feas_tol");
+
+        // Invalid tolerance rejection: NaN feas_tol
+        auto nan_tol_st = BasicSolution::check_primal_feasibility(A, b_vec, sol, x_work, res_scratch, res_out, std::numeric_limits<Scalar>::quiet_NaN());
+        check(!nan_tol_st.is_ok() && nan_tol_st.code() == StatusCode::InvalidArgument,
+              "TEST-BASIS-23: Rejects NaN feas_tol");
+
+        // Workspace size mismatch rejection: x_work size != n
+        auto x_bad = DenseVector::create(4).value();
+        auto bad_x_st = BasicSolution::check_primal_feasibility(A, b_vec, sol, x_bad, res_scratch, res_out, 1e-7);
+        check(!bad_x_st.is_ok() && bad_x_st.code() == StatusCode::InvalidArgument,
+              "TEST-BASIS-23: Rejects mismatched x_workspace dimension");
+    }
+
     // TEST-PROP-01: Deterministic property testing with independent oracle
     {
         std::mt19937_64 rng(424242);
