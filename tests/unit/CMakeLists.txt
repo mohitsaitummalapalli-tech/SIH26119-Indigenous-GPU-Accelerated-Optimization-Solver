@@ -52,3 +52,8 @@ add_test(NAME NumericsTest COMMAND test_numerics)
 add_executable(test_lp_standardization test_lp_standardization.cpp)
 target_link_libraries(test_lp_standardization PRIVATE sih26119_solver)
 add_test(NAME LpStandardizationTest COMMAND test_lp_standardization)
+
+# Phase 3B: Basis Representation & State Layer
+add_executable(test_basis test_basis.cpp)
+target_link_libraries(test_basis PRIVATE sih26119_solver)
+add_test(NAME BasisTest COMMAND test_basis)

@@ -8,6 +8,9 @@ add_library(sih26119_solver STATIC
     numerics/dense_matrix.cpp
     numerics/sparse_matrix.cpp
     solver/lp/lp_standard_form.cpp
+    solver/lp/basis.cpp
+    solver/lp/basic_solution.cpp
+    solver/lp/basis_matrix_view.cpp
 )
 
 target_include_directories(sih26119_solver PUBLIC
