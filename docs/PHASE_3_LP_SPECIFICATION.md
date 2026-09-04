@@ -1,7 +1,7 @@
 # Phase 3: LP Solver Core — Mathematical & Engineering Specification
 
-**Document Version:** 1.1.0
-**Status:** APPROVED & AUDITED SPECIFICATION
+**Document Version:** 1.2.0
+**Status:** AUDITED & APPROVED SPECIFICATION (Final Gate)
 **Authoritative Baseline Commit:** `7bfa19a097b674d83ca79ce3886c1ed36db9eb33`
 **Repository:** `SIH26119-Indigenous-GPU-Accelerated-Optimization-Solver`
 
@@ -15,10 +15,10 @@ Phase 3 establishes the linear programming (LP) solver core for the SIH26119 opt
 2. Basis state representation and algebraic partitioning.
 3. First-principles revised simplex method for canonical minimization.
 4. Primal simplex algorithm with deterministic anti-cycling.
-5. Two-Phase (Phase I / Phase II) method for artificial-variable initialization and redundant constraint removal.
+5. Two-Phase (Phase I / Phase II) method for artificial-variable initialization, cleanup, and redundant constraint removal.
 6. Dual simplex algorithm specification.
 7. Abstract basis-factorization numerical contracts integrated with Phase 2 zero-allocation workspaces.
-8. Rigorous isolation of numerical tolerances across decision boundaries.
+8. Rigorous isolation of numerical decision thresholds.
 9. Independent mathematical verification and vertex-enumeration oracle architectures.
 10. Deterministic test matrix defining exact benchmark instances.
 
@@ -68,7 +68,7 @@ Phase 3 strictly harmonizes with Phase 1 and Phase 2 types:
 - Dimension counts (number of rows $\bar{m}$, columns $\bar{n}$): `Dimension` (`uint32_t`).
 - Iteration counters: `uint64_t`.
 - Nonzero element counts: `NonzeroCount` (`uint64_t`).
-- Conversions between `size_t` containers and `Index` / `Dimension` MUST use `to_index()` and `to_dimension()` from `src/numerics/index.hpp`. Silent signed integer conversions (e.g. `int64_t`) are prohibited.
+- Conversions between `size_t` containers and `Index` / `Dimension` MUST use `to_index()` and `to_dimension()` from `src/numerics/index.hpp`.
 
 ### 2.3 Subsystem Invariants & Explicit Assumptions
 - **Allowed Assumptions**:
@@ -138,13 +138,6 @@ Every variable $x_j$ ($j \in \{0, \dots, n-1\}$) is mapped to non-negative varia
 | **(e) Free Variable** | $lb_j = -\infty, ub_j = +\infty$ | $\bar{x}_k^+ \ge 0, \bar{x}_k^- \ge 0$ | $x_j = \bar{x}_k^+ - \bar{x}_k^-$ | $\bar{c}_k^+ = c_j, \bar{c}_k^- = -c_j$ | $0$ |
 | **(f) Fixed Variable** | $lb_j = ub_j = C_j$ | None (eliminated) | $x_j = C_j$ | None | $+c_j \cdot C_j$ |
 
-#### Equivalence Proofs:
-- **Case (b)**: Since $lb_j$ is finite and fixed, the map $\phi: [lb_j, \infty) \to [0, \infty)$ defined by $\phi(x_j) = x_j - lb_j = \bar{x}_k$ is an affine bijection. Substituting $x_j = \bar{x}_k + lb_j$ into $c_j x_j$ yields $c_j \bar{x}_k + c_j lb_j$. Constraint column $A_{:, j} x_j = A_{:, j} \bar{x}_k + lb_j A_{:, j}$. Moving the constant vector to RHS preserves the constraint set identically.
-- **Case (c)**: The map $\psi: (-\infty, ub_j] \to [0, \infty)$ defined by $\psi(x_j) = ub_j - x_j = \bar{x}_k$ is an affine bijection. Substituting $x_j = ub_j - \bar{x}_k$ yields $c_j x_j = -c_j \bar{x}_k + c_j ub_j$. Constraint column $A_{:, j} x_j = -A_{:, j} \bar{x}_k + ub_j A_{:, j}$.
-- **Case (d)**: Let $\bar{x}_k = x_j - lb_j \ge 0$. The condition $x_j \le ub_j$ becomes $\bar{x}_k \le ub_j - lb_j$. Introducing slack $s_j \ge 0$ via the equality $\bar{x}_k + s_j = ub_j - lb_j$ restricts $\bar{x}_k \in [0, ub_j - lb_j]$ since $s_j \ge 0$ and $ub_j - lb_j > 0$.
-- **Case (e)**: Any real number $x \in \mathbb{R}$ can be expressed as $x = x^+ - x^-$ where $x^+ = \max(x, 0) \ge 0$ and $x^- = \max(-x, 0) \ge 0$. In standard form, columns are $A_{:, j}$ and $-A_{:, j}$. At any basic solution, linear dependence prevents both $x^+$ and $x^-$ from being basic simultaneously unless degenerate at zero.
-- **Case (f)**: When $lb_j = ub_j = C_j$, the feasible set restricts $x_j \in \{C_j\}$. Direct substitution eliminates the variable coordinate, shifting constraint RHS by $-C_j A_{:, j}$ and objective offset by $+c_j C_j$.
-
 ---
 
 ### 3.5 Complete Constraint & Two-Sided Range Transformation
@@ -158,44 +151,27 @@ $$\tilde{l}_i \le \bar{a}_i^T \bar{x}_{\text{struct}} \le \tilde{u}_i$$
 where $\tilde{l}_i = l_i - \kappa_i$ and $\tilde{u}_i = u_i - \kappa_i$.
 
 #### Explicit Transformations:
-
 1. **Equality Constraint ($l_i == u_i = b_i$)**:
    $$\bar{a}_i^T \bar{x}_{\text{struct}} = \tilde{b}_i \quad (\text{where } \tilde{b}_i = b_i - \kappa_i)$$
-   - New variables: $0$.
-   - New equations: $1$.
-
 2. **Less-Than-or-Equal Constraint ($l_i = -\infty$, finite $u_i$)**:
    Introduce non-negative slack variable $s_i \ge 0$:
    $$\bar{a}_i^T \bar{x}_{\text{struct}} + s_i = \tilde{u}_i, \quad \bar{c}(s_i) = 0$$
-   - New variables: $1$ ($s_i \ge 0$).
-   - New equations: $1$.
-
 3. **Greater-Than-or-Equal Constraint (finite $l_i$, $u_i = +\infty$)**:
    Introduce non-negative surplus variable $e_i \ge 0$:
    $$\bar{a}_i^T \bar{x}_{\text{struct}} - e_i = \tilde{l}_i, \quad \bar{c}(e_i) = 0$$
-   - New variables: $1$ ($e_i \ge 0$).
-   - New equations: $1$.
-
 4. **Two-Sided Range Constraint ($-\infty < l_i < u_i < +\infty$)**:
-   The range constraint enforces both $\bar{a}_i^T \bar{x}_{\text{struct}} \ge \tilde{l}_i$ and $\bar{a}_i^T \bar{x}_{\text{struct}} \le \tilde{u}_i$.
-   We introduce **TWO** explicit non-negative auxiliary variables:
+   Introduce two explicit non-negative auxiliary variables:
    - Primary surplus variable $s_i \ge 0$
    - Range slack variable $t_i \ge 0$
 
-   Construct **TWO** standard equality equations:
+   Construct two standard equality equations:
    $$\begin{aligned}
    \text{Row 1 (Lower Bound):} \quad & \bar{a}_i^T \bar{x}_{\text{struct}} - s_i = \tilde{l}_i \\
    \text{Row 2 (Range Length):} \quad & s_i + t_i = u_i - l_i
    \end{aligned}$$
    with $\bar{c}(s_i) = 0$, $\bar{c}(t_i) = 0$.
-
-   **Feasible-Set Equivalence Proof**:
-   - **Forward**: Suppose $x$ satisfies $l_i \le a_i^T x \le u_i$. Then $\tilde{l}_i \le \bar{a}_i^T \bar{x}_{\text{struct}} \le \tilde{u}_i$. Define $s_i = \bar{a}_i^T \bar{x}_{\text{struct}} - \tilde{l}_i$ and $t_i = \tilde{u}_i - \bar{a}_i^T \bar{x}_{\text{struct}}$. Since $\bar{a}_i^T \bar{x}_{\text{struct}} \ge \tilde{l}_i$, $s_i \ge 0$. Since $\bar{a}_i^T \bar{x}_{\text{struct}} \le \tilde{u}_i$, $t_i \ge 0$. Adding gives $s_i + t_i = \tilde{u}_i - \tilde{l}_i = (u_i - \kappa_i) - (l_i - \kappa_i) = u_i - l_i$. Both equations hold with $s_i, t_i \ge 0$.
-   - **Converse**: Suppose $(\bar{x}_{\text{struct}}, s_i, t_i)$ satisfies the two equations with $s_i \ge 0, t_i \ge 0$. From Row 1, $\bar{a}_i^T \bar{x}_{\text{struct}} = \tilde{l}_i + s_i \ge \tilde{l}_i$ (since $s_i \ge 0$). From Row 2, $s_i = (u_i - l_i) - t_i$. Substituting into Row 1 gives $\bar{a}_i^T \bar{x}_{\text{struct}} = \tilde{l}_i + (u_i - l_i) - t_i = \tilde{u}_i - t_i \le \tilde{u}_i$ (since $t_i \ge 0$). Thus $\tilde{l}_i \le \bar{a}_i^T \bar{x}_{\text{struct}} \le \tilde{u}_i$, which is identically $l_i \le a_i^T x \le u_i$.
-   - **Objective and RHS Preservation**: $\bar{c}(s_i) = 0$ and $\bar{c}(t_i) = 0$ preserve the objective. Row 2 RHS is $u_i - l_i > 0$, guaranteed strictly non-negative.
-
 5. **Free Constraint ($l_i = -\infty, u_i = +\infty$)**:
-   Mathematically vacuous; verified and eliminated from $\bar{A} \bar{x} = \bar{b}$.
+   Mathematically redundant; verified and omitted from standard system.
 
 ---
 
@@ -205,45 +181,26 @@ For every standard equality row $k \in \{0, \dots, \bar{m}-1\}$ with equation $\
   $$\bar{a}_k \leftarrow -\bar{a}_k, \quad \bar{b}_k \leftarrow -\bar{b}_k$$
 - If $\bar{b}_k \ge 0$: row remains unchanged.
 
-#### Verification of Invariants:
-1. **Feasibility**: For any scalar equation, $u = v \iff -u = -v$. Solution set is invariant.
-2. **Basis Initialization in Phase I**: Phase I adds $+a_k$ to row $k$: $\bar{a}_k^T \bar{x} + a_k = \bar{b}_k$. Setting $\bar{x} = 0$ yields $a_k = \bar{b}_k \ge 0$, establishing a valid non-negative initial BFS with identity basis $B^{(0)} = I_{\bar{m}}$.
-3. **Objective Invariance**: Constraint row scaling does not affect objective cost vector $\bar{c}$ or constant offset $\bar{c}_0$.
-
 ---
 
 ## 4. Basis Mathematics & Theoretical Foundations
 
 ### 4.1 Partition of the Standard System
 Given $\bar{A} \bar{x} = \bar{b}, \bar{x} \ge 0$ with $\bar{A} \in \mathbb{R}^{\bar{m} \times \bar{n}}$ ($\bar{m} \le \bar{n}$) and $\operatorname{rank}(\bar{A}) = \bar{m}$:
-- **Basis Index Set**: An ordered sequence of $\bar{m}$ column indices:
-  $$\mathcal{B} = \{B(0), B(1), \dots, B(\bar{m}-1)\} \subset \{0, \dots, \bar{n}-1\}$$
-- **Nonbasic Index Set**: The remaining $\bar{n} - \bar{m}$ indices:
-  $$\mathcal{N} = \{N(0), N(1), \dots, N(\bar{n}-\bar{m}-1)\} = \{0, \dots, \bar{n}-1\} \setminus \mathcal{B}$$
+- **Basis Index Set**: $\mathcal{B} = \{B(0), B(1), \dots, B(\bar{m}-1)\} \subset \{0, \dots, \bar{n}-1\}$.
+- **Nonbasic Index Set**: $\mathcal{N} = \{0, \dots, \bar{n}-1\} \setminus \mathcal{B}$.
 
-Matrix partition:
 $$\bar{A} = \begin{bmatrix} B & N \end{bmatrix}, \quad \bar{x} = \begin{bmatrix} x_B \\ x_N \end{bmatrix}, \quad \bar{c} = \begin{bmatrix} c_B \\ c_N \end{bmatrix}$$
-where $B \in \mathbb{R}^{\bar{m} \times \bar{m}}$ is the nonsingular basis matrix.
+Basic solution: $x_B = B^{-1} \bar{b}, x_N = 0$.
 
-### 4.2 Derivation of the Basic Solution
-From $\bar{A} \bar{x} = \bar{b}$:
-$$B x_B + N x_N = \bar{b}$$
-Multiplying by $B^{-1}$:
-$$x_B = B^{-1} \bar{b} - B^{-1} N x_N$$
-Setting nonbasic variables to zero ($x_N = 0$) defines the **basic solution**:
-$$x_B = B^{-1} \bar{b}, \quad x_N = 0$$
-
-### 4.3 Primal Feasibility & Degeneracy
+### 4.2 Primal Feasibility & Numerical Singularity Distinction
 1. **Basic Feasible Solution (BFS)**:
-   A basic solution is feasible if and only if:
-   $$x_B = B^{-1} \bar{b} \ge 0$$
-   Numerically evaluated with feasibility tolerance $\epsilon_{\text{feas}}$:
    $$x_{B, i} \ge -\epsilon_{\text{feas}}, \quad \forall i \in \{0, \dots, \bar{m}-1\}$$
 2. **Degenerate BFS**:
-   A BFS is degenerate if there exists at least one basic coordinate $i$ such that:
-   $$|x_{B, i}| \le \epsilon_{\text{feas}}$$
-3. **Singular Basis**:
-   If the condition estimate $\kappa(B) > \epsilon_{\text{sing}}^{-1}$ or any pivot in the LU factorization has $|U_{k,k}| \le \epsilon_{\text{sing}}$, the basis is numerically singular. The solver terminates with `StatusCode::NumericalFailure`.
+   At least one basic coordinate satisfies $|x_{B, i}| \le \epsilon_{\text{feas}}$.
+3. **Singularity Threshold vs. Condition Number**:
+   - `singularity_threshold` ($\epsilon_{\text{sing}} = 10^{-12}$): A local pivot acceptance criterion during LU factorization. If during Gaussian elimination at step $k$, no available candidate pivot satisfies $|U_{i,k}| > \epsilon_{\text{sing}}$, the basis matrix is numerically rank-deficient / singular at working precision. The solver halts factorization and returns `StatusCode::NumericalFailure`.
+   - `condition_number_estimate`: A separate global diagnostic metric ($\kappa(B) = \|B\| \cdot \|B^{-1}\|$). A pivot threshold $\epsilon_{\text{sing}}$ does NOT mathematically imply $\kappa(B) \le \epsilon_{\text{sing}}^{-1}$ (e.g., ill-conditioned triangular matrices can have unit diagonal while exhibiting exponential condition numbers). If the condition estimate exceeds an operational ceiling (e.g. $10^{13}$), the solver flags ill-conditioning to trigger refactorization or basis repair.
 
 ---
 
@@ -253,74 +210,38 @@ $$x_B = B^{-1} \bar{b}, \quad x_N = 0$$
 Under the canonical minimization convention:
 $$z = c_B^T x_B + c_N^T x_N + \bar{c}_0$$
 Substitute $x_B = B^{-1} \bar{b} - B^{-1} N x_N$:
-$$\begin{aligned}
-z &= c_B^T \left( B^{-1} \bar{b} - B^{-1} N x_N \right) + c_N^T x_N + \bar{c}_0 \\
-&= c_B^T B^{-1} \bar{b} + \bar{c}_0 + \left( c_N^T - c_B^T B^{-1} N \right) x_N
-\end{aligned}$$
+$$z = c_B^T B^{-1} \bar{b} + \bar{c}_0 + \left( c_N^T - c_B^T B^{-1} N \right) x_N$$
 
-### 5.2 Dual Multiplier Vector (BTRAN)
-Define the simplex dual multiplier vector $y \in \mathbb{R}^{\bar{m}}$ by:
-$$y^T = c_B^T B^{-1} \iff B^T y = c_B$$
-Solved via backward transformation (BTRAN).
-
-### 5.3 Reduced Costs & Optimality Condition
-The objective function becomes:
-$$z = y^T \bar{b} + \bar{c}_0 + \sum_{j \in \mathcal{N}} \bar{c}_j x_j$$
-where the **reduced cost** of nonbasic column $j \in \mathcal{N}$ with column vector $\bar{A}_{:, j}$ is:
+### 5.2 Dual Multipliers (BTRAN) & Reduced Costs
+$$B^T y = c_B$$
+For each nonbasic column $j \in \mathcal{N}$:
 $$\bar{c}_j = c_j - y^T \bar{A}_{:, j} = c_j - \bar{A}_{:, j}^T y$$
 
-**Optimality Theorem (Minimization)**:
-At the current basic solution, $x_N = 0$. For any feasible solution $x$, $x_N \ge 0$.
-If $\bar{c}_j \ge -\epsilon_{\text{opt}}$ for all $j \in \mathcal{N}$, then:
-$$z(x) - z(x^*) = \sum_{j \in \mathcal{N}} \bar{c}_j x_j \ge 0 \implies z(x) \ge z(x^*)$$
-Hence, the current BFS is globally optimal.
+Optimality: If $\bar{c}_j \ge -\epsilon_{\text{opt}}$ for all $j \in \mathcal{N}$, current BFS is optimal.
 
-### 5.4 Search Direction (FTRAN)
-If there exists $q \in \mathcal{N}$ such that $\bar{c}_q < -\epsilon_{\text{opt}}$, increasing $x_q$ from $0$ to $\theta > 0$ decreases $z$.
-Let $x_q = \theta$ and $x_j = 0$ for $j \in \mathcal{N} \setminus \{q\}$. The basic variables adjust as:
-$$x_B(\theta) = B^{-1} \bar{b} - \theta B^{-1} \bar{A}_{:, q} = x_B - \theta d$$
-where $d \in \mathbb{R}^{\bar{m}}$ is the **direction vector** solved via forward transformation (FTRAN):
+### 5.3 Direction Vector (FTRAN) & Ratio Test
+If $\exists q \in \mathcal{N}$ with $\bar{c}_q < -\epsilon_{\text{opt}}$, solve:
 $$B d = \bar{A}_{:, q}$$
-
-### 5.5 Minimum Ratio Test & Leaving Variable
-Primal feasibility requires:
-$$x_{B, i}(\theta) = x_{B, i} - \theta d_i \ge 0, \quad \forall i \in \{0, \dots, \bar{m}-1\}$$
-- **Unboundedness**: If $d_i \le \epsilon_{\text{pivot}}$ for all $i \in \{0, \dots, \bar{m}-1\}$, $\theta$ can increase to $+\infty$ without violating non-negativity. Since $\bar{c}_q < 0$, $z(\theta) = z_0 + \theta \bar{c}_q \to -\infty$. The LP is **UNBOUNDED**.
-- **Ratio Test**: For rows where $d_i > \epsilon_{\text{pivot}}$:
-  $$\theta_i = \frac{x_{B, i}}{d_i}$$
-  The maximum feasible step length is:
-  $$\theta^* = \min_{i : d_i > \epsilon_{\text{pivot}}} \frac{x_{B, i}}{d_i}$$
-  Let row $p$ achieve this minimum ratio:
-  $$p = \operatorname{argmin}_{i : d_i > \epsilon_{\text{pivot}}} \frac{x_{B, i}}{d_i}$$
-  Variable $B(p)$ leaves the basis and becomes nonbasic at zero.
-
-### 5.6 Basis & Objective Updates
-1. Basic solution update:
-   $$x_{B, i}' = x_{B, i} - \theta^* d_i \quad (\forall i \ne p), \quad x_{B, p}' = \theta^*$$
-2. Basis partition update:
-   $$\mathcal{B}' = (\mathcal{B} \setminus \{B(p)\}) \cup \{q\}$$
-3. Objective value update:
-   $$z' = z + \theta^* \bar{c}_q \le z \quad (\text{strictly decreasing if } \theta^* > 0)$$
+- If $d_i \le \epsilon_{\text{pivot}}$ for all $i \in \{0, \dots, \bar{m}-1\}$, problem is **UNBOUNDED**.
+- Otherwise:
+  $$\theta^* = \min_{i: d_i > \epsilon_{\text{pivot}}} \frac{x_{B, i}}{d_i}, \quad p = \operatorname{argmin}_{i: d_i > \epsilon_{\text{pivot}}} \frac{x_{B, i}}{d_i}$$
+Basic updates: $x_{B, i}' = x_{B, i} - \theta^* d_i$ ($\forall i \ne p$), $x_{B, p}' = \theta^*$.
+Objective update: $z' = z + \theta^* \bar{c}_q \le z$.
 
 ---
 
-## 6. Primal Simplex & Anti-Cycling Specification
+## 6. Primal Simplex & Deterministic Pivot Selection
 
-### 6.1 Classical Bland's Rule vs. Numerical Deterministic Rule
-- **Classical Bland's Rule (Exact Arithmetic)**:
-  1. Entering variable: $q = \min \{ j \in \mathcal{N} : \bar{c}_j < 0 \}$.
-  2. Leaving variable: $p = \operatorname{argmin}_{i \in \Theta} B(i)$, where $\Theta = \operatorname{argmin}_{i: d_i > 0} (x_{B, i} / d_i)$.
-  In exact rational arithmetic, Bland's rule guarantees finite termination with zero cycling.
+### 6.1 Classical Bland's Rule vs. Numerical Rule
+- **Classical Bland's Rule (Exact Arithmetic)**: Select smallest variable index among entering candidates ($\bar{c}_j < 0$) and leaving candidates achieving the exact minimum ratio. Mathematically guarantees zero cycling in exact arithmetic.
 - **Tolerance-Aware Deterministic Pivot Selection (Floating-Point Arithmetic)**:
-  In IEEE 754 double precision, exact mathematical equality between ratios is rare due to roundoff. Phase 3 specifies the numerical rule:
-  1. **Entering Candidate**:
+  1. Entering variable:
      $$q = \min \{ j \in \mathcal{N} : \bar{c}_j < -\epsilon_{\text{opt}} \}$$
-  2. **Tied-Ratio Leaving Candidates**:
-     Compute $\theta^* = \min_{i: d_i > \epsilon_{\text{pivot}}} (x_{B, i} / d_i)$. Form the candidate set:
+  2. Leaving candidate set:
      $$\Theta = \left\{ i \in \{0, \dots, \bar{m}-1\} : d_i > \epsilon_{\text{pivot}} \text{ and } \left| \frac{x_{B, i}}{d_i} - \theta^* \right| \le \epsilon_{\text{feas}} \max(1.0, \theta^*) \right\}$$
-  3. **Deterministic Tie-Breaking**:
+  3. Deterministic tie-breaking:
      $$p = \operatorname{argmin}_{i \in \Theta} B(i)$$
-- **Mathematical Limitation**: In floating-point arithmetic, roundoff error can perturb basis updates such that mathematical cycling prevention is NOT guaranteed by Bland's rule alone. Bland's rule provides deterministic tie-breaking. Complete numerical stalling prevention requires periodic basis refactorization and iteration limits.
+  In floating-point arithmetic, roundoff error can perturb reduced costs and step lengths; Bland's rule provides **deterministic tie-breaking**, but complete anti-cycling requires periodic refactorization and iteration limits.
 
 ---
 
@@ -328,34 +249,38 @@ $$x_{B, i}(\theta) = x_{B, i} - \theta d_i \ge 0, \quad \forall i \in \{0, \dots
 
 ### 7.1 Phase I Auxiliary Construction
 Given $\bar{A} \bar{x} = \bar{b}$ with $\bar{b} \ge 0$:
-1. Introduce an artificial variable $a_i \ge 0$ for each row $i \in \{0, \dots, \bar{m}-1\}$:
-   $$\bar{A} \bar{x} + I_{\bar{m}} a = \bar{b}, \quad \bar{x} \ge 0, \; a \ge 0$$
-2. Phase I objective:
-   $$\min w = \sum_{i=0}^{\bar{m}-1} a_i$$
-3. Initial Phase I basis: $B = I_{\bar{m}}$, with $x_B = a = \bar{b} \ge 0, x_N = 0$.
+$$\min w = \sum_{i=0}^{\bar{m}-1} a_i \quad \text{s.t.} \quad \bar{A} \bar{x} + I_{\bar{m}} a = \bar{b}, \quad \bar{x} \ge 0, \; a \ge 0$$
+Initial basis: $B^{(0)} = I_{\bar{m}}$, $x_B = a = \bar{b} \ge 0, x_N = 0$.
 
-### 7.2 Phase I Infeasibility Termination
-Solve Phase I to optimality using primal simplex. Let $w^*$ be the optimal value:
-- **Case 1: $w^* > \epsilon_{\text{feas}}$**:
-  Since $a_i \ge 0$, $\min \sum a_i > 0$ rigorously proves there exists no non-negative $\bar{x}$ satisfying $\bar{A} \bar{x} = \bar{b}$. The original LP is **INFEASIBLE**. Terminate with `LpSolverStatus::Infeasible`.
-- **Case 2: $w^* \le \epsilon_{\text{feas}}$**:
-  A feasible solution exists. Proceed to artificial variable cleanup.
+### 7.2 Termination Criteria
+- If optimal Phase I objective $w^* > \epsilon_{\text{feas}}$: original LP is **INFEASIBLE**. Return `LpSolverStatus::Infeasible`.
+- If $w^* \le \epsilon_{\text{feas}}$: feasible solution exists. Proceed to artificial variable cleanup.
 
-### 7.3 Artificial Variable Cleanup & Redundant Row Elimination
-At Phase I termination with $w^* \le \epsilon_{\text{feas}}$, all artificial variables have value $a_i \le \epsilon_{\text{feas}}$:
-1. **Nonbasic Artificials**: Discard all artificial columns from the model.
-2. **Basic Artificials (Degenerate Rows)**:
-   For each row $k$ where $B(k)$ is an artificial variable (with $x_{B, k} \le \epsilon_{\text{feas}}$):
-   - Compute tableau row $v^T = e_k^T B^{-1} \bar{A}$.
-   - Inspect coefficients for nonbasic structural variables $j \in \mathcal{N}_{\text{struct}}$:
-     - If $\exists j \in \mathcal{N}_{\text{struct}}$ such that $|v_j| > \epsilon_{\text{pivot}}$:
-       Perform a degenerate zero-length pivot ($\theta^* = 0$), entering structural variable $j$ and expelling artificial variable $B(k)$.
-     - If $|v_j| \le \epsilon_{\text{pivot}}$ for all $j \in \mathcal{N}_{\text{struct}}$:
-       Row $k$ has $e_k^T B^{-1} \bar{A} = 0^T$ and $e_k^T B^{-1} \bar{b} = x_{B, k} \approx 0$. This proves constraint row $k$ is a linear combination of other rows—i.e., it is a **REDUNDANT CONSTRAINT**.
-       - Row $k$ is deleted from $\bar{A}$ and $\bar{b}$.
-       - Row dimension $\bar{m}$ decreases by 1.
-       - Basis factorization is rebuilt for the reduced $(\bar{m}-1) \times (\bar{m}-1)$ system.
-3. **Phase II Transition**: Restore original objective $\bar{c}$, form basis matrix from remaining structural columns, and solve Phase II to optimality.
+### 7.3 Complete Artificial Variable Cleanup & Redundant Row Theorem
+Let the final Phase I basis be $B$ with nonbasic partition $\mathcal{N} = \mathcal{N}_{\text{struct}} \cup \mathcal{N}_{\text{art}}$.
+For each basic artificial variable $B(k) \in \mathcal{B}$ with $B(k) \ge \bar{n}$ (having $x_{B, k} \le \epsilon_{\text{feas}}$):
+The complete tableau row $k$ is:
+$$x_{B, k} + \sum_{j \in \mathcal{N}_{\text{struct}}} \alpha_{k, j} \bar{x}_j + \sum_{j \in \mathcal{N}_{\text{art}}} \beta_{k, j} a_{j - \bar{n}} = (B^{-1} \bar{b})_k$$
+where $\alpha_{k, j} = e_k^T B^{-1} \bar{A}_{:, j}$ and $\beta_{k, j} = (B^{-1})_{k, j - \bar{n}}$.
+
+In the original problem, artificial variables are restricted to zero ($a = 0$). The row equation restricted to the structural space is:
+$$\sum_{j \in \mathcal{N}_{\text{struct}}} \alpha_{k, j} \bar{x}_j = (B^{-1} \bar{b})_k$$
+
+**Structural Pivot vs. Redundancy Cases**:
+1. **Case 1 (Structural Pivot Exists)**:
+   There exists at least one nonbasic structural variable $j^* \in \mathcal{N}_{\text{struct}}$ such that $|\alpha_{k, j^*}| > \epsilon_{\text{pivot}}$.
+   Perform a zero-step pivot ($\theta^* = 0$): variable $j^*$ enters the basis in row $k$, and artificial variable $B(k)$ leaves the basis and is eliminated. The basis size $\bar{m}$ remains unchanged, primal solution $\bar{x}$ remains unchanged, and the basis factorization is updated via standard rank-1 update.
+2. **Case 2 (Redundant Row)**:
+   For ALL nonbasic structural variables $j \in \mathcal{N}_{\text{struct}}$, $|\alpha_{k, j}| \le \epsilon_{\text{pivot}}$.
+   Since basic structural variables have coefficient 0 in row $k$ by definition of canonical tableau, this implies:
+   $$(e_k^T B^{-1}) \bar{A} = 0^T$$
+   Let vector $\lambda^T = e_k^T B^{-1} \in \mathbb{R}^{\bar{m}}$. Since $B$ is invertible, $\lambda \ne 0$.
+   Thus $\lambda^T \bar{A} = 0^T$, and furthermore $\lambda^T \bar{b} = (B^{-1} \bar{b})_k = x_{B, k} \approx 0$.
+   This mathematically proves that constraint row $k$ in the standardized system is a linear combination of other rows:
+   $$\bar{A}_{k, :} = \sum_{i \ne k} \mu_i \bar{A}_{i, :}, \quad \bar{b}_k = \sum_{i \ne k} \mu_i \bar{b}_i$$
+   **Proof of Feasible-Set Preservation**: Any $\bar{x}$ satisfying the other $\bar{m}-1$ equations automatically satisfies row $k$. Deleting row $k$ from $\bar{A}$ and $\bar{b}$ preserves the original feasible set $\{\bar{x} \ge 0 : \bar{A}\bar{x} = \bar{b}\}$ identically.
+   **Crucial Property**: The presence of non-zero artificial coefficients $\beta_{k, j} \ne 0$ relates solely to artificial variable dependencies in Phase I and does NOT establish or prevent redundancy of the original LP. Redundancy depends strictly on structural coefficients $\alpha_{k, j}$.
+   **Post-Deletion Factorization Rebuild**: Deleting row $k$ reduces the row dimension from $\bar{m}$ to $\bar{m}-1$. The remaining $\bar{m}-1$ basic variables form an $(\bar{m}-1) \times (\bar{m}-1)$ basis matrix. The factorization cannot be updated via rank-1 update; a clean REFACTORIZATION of the reduced $(\bar{m}-1) \times (\bar{m}-1)$ system is required.
 
 ---
 
@@ -366,39 +291,27 @@ Dual Simplex maintains dual feasibility:
 $$\bar{c}_j = c_j - \bar{A}_{:, j}^T y \ge -\epsilon_{\text{opt}}, \quad \forall j \in \mathcal{N}$$
 while primal feasibility is violated ($x_{B, i} < -\epsilon_{\text{feas}}$ for some $i$).
 
-### 8.2 Leaving Row Selection
-If $x_{B, i} \ge -\epsilon_{\text{feas}}$ for all $i$, solution is primal feasible and optimal.
-Otherwise, select leaving row $l$ by deterministic minimum:
-$$l = \operatorname{argmin}_{i: x_{B, i} < -\epsilon_{\text{feas}}} x_{B, i}$$
-(Ties broken by smallest basic variable index $B(i)$).
-
-### 8.3 Entering Column Selection (Dual Ratio Test)
-1. Compute pivot row $v^T = e_l^T B^{-1} N$ via BTRAN ($B^T u = e_l, v_j = u^T \bar{A}_{:, j}$).
-2. **Dual Unboundedness (Primal Infeasibility)**:
-   If $v_j \ge -\epsilon_{\text{pivot}}$ for all $j \in \mathcal{N}$:
-   For any dual step $\gamma \le 0$, $\bar{c}_j - \gamma v_j \ge 0$. As $\gamma \to -\infty$, dual objective $b^T y + \gamma x_{B, l} \to +\infty$ (since $x_{B, l} < 0$).
-   The dual problem is unbounded $\implies$ the primal LP is **INFEASIBLE**.
-3. **Dual Ratio Test**:
-   To preserve dual feasibility $\bar{c}_j - \gamma v_j \ge 0$ for $v_j < -\epsilon_{\text{pivot}}$:
-   $$\gamma = \frac{\bar{c}_{j^*}}{v_{j^*}} \implies j^* = \operatorname{argmin}_{j \in \mathcal{N} : v_j < -\epsilon_{\text{pivot}}} \left( \frac{\bar{c}_j}{-v_j} \right) \equiv \operatorname{argmin}_{j \in \mathcal{N} : v_j < -\epsilon_{\text{pivot}}} \left( \frac{\bar{c}_j}{|v_j|} \right)$$
-   Ties broken deterministically by smallest variable index $j$.
+### 8.2 Leaving Row & Entering Column Selection
+- Leaving row: $l = \operatorname{argmin}_{i: x_{B, i} < -\epsilon_{\text{feas}}} x_{B, i}$.
+- BTRAN: $B^T u = e_l \implies v_j = u^T \bar{A}_{:, j}$ for $j \in \mathcal{N}$.
+- If $v_j \ge -\epsilon_{\text{pivot}}$ for all $j \in \mathcal{N}$, dual is unbounded $\implies$ primal LP is **INFEASIBLE**.
+- Dual ratio test:
+  $$q = \operatorname{argmin}_{j \in \mathcal{N} : v_j < -\epsilon_{\text{pivot}}} \left( \frac{\bar{c}_j}{-v_j} \right) \equiv \operatorname{argmin}_{j \in \mathcal{N} : v_j < -\epsilon_{\text{pivot}}} \left( \frac{\bar{c}_j}{|v_j|} \right)$$
+  Ties broken deterministically by smallest variable index $j$.
 
 ---
 
 ## 9. Numerical Linear Algebra & Basis Factorization Contract
 
 ### 9.1 Phase 2 Zero-Allocation Hot-Path Integration
-Phase 2 established that numerical hot paths must operate without dynamic heap allocations via caller-owned workspaces. Phase 3 strictly adheres:
+Phase 3 adheres strictly to Phase 2 contracts:
 - FTRAN ($B d = \bar{A}_{:, q}$) and BTRAN ($B^T y = c_B$) reuse preallocated workspace vectors `DenseVector ftran_workspace` and `DenseVector btran_workspace`.
 - SpMV operations utilize the 3-argument API:
   `SparseMatrix::multiply(x, y, scratch)`
 - No `std::vector`, `std::make_unique`, `malloc`, or `resize` calls are permitted inside the simplex pivot loop.
 
 ### 9.2 Abstract Basis Factorization Contract
-Direct matrix inversion ($B^{-1}$) is prohibited:
-- Destroys matrix sparsity.
-- Requires $O(\bar{m}^3)$ arithmetic per update.
-- Suffers from catastrophic numerical instability and round-off accumulation.
+Direct matrix inversion ($B^{-1}$) is prohibited.
 
 ```cpp
 namespace sih26119 {
@@ -444,9 +357,9 @@ public:
 
 ---
 
-## 10. Distinct Numerical Tolerances Specification
+## 10. Distinct Numerical Decision Thresholds
 
-Simplex decision making requires distinct numerical thresholds tailored to specific mathematical domains:
+Numerical thresholds are strictly separated across decision boundaries:
 
 ```cpp
 namespace sih26119 {
@@ -461,10 +374,10 @@ struct SimplexTolerances {
     /// Pivot selection threshold: minimum denominator magnitude in ratio test
     Scalar pivot_tol{1e-10};
 
-    /// Basis singularity threshold: rejection threshold for ill-conditioned bases
+    /// Basis singularity threshold: pivot acceptance threshold during LU factorization
     Scalar singularity_threshold{1e-12};
 
-    /// Structural zero tolerance: flush tiny numerical noise to exact zero
+    /// Decision threshold for comparison to zero (never destructively overwrites numbers)
     Scalar zero_threshold{1e-15};
 
     /// Phase 1 semantic model comparison tolerance
@@ -474,12 +387,15 @@ struct SimplexTolerances {
 } // namespace sih26119
 ```
 
-#### Mathematical Justification for Double Precision:
-1. $\epsilon_{\text{feas}} = 10^{-8}$: Scaled approximately as $\sqrt{\epsilon_{\text{mach}}}$ ($\approx 1.5 \times 10^{-8}$ in IEEE 754). Provides 8 digits of constraint satisfaction while tolerating accumulated rounding error.
-2. $\epsilon_{\text{opt}} = 10^{-8}$: Ensures reliable termination without premature convergence or cycling on near-zero reduced costs.
-3. $\epsilon_{\text{pivot}} = 10^{-10}$: Roughly $10^6 \times \epsilon_{\text{mach}}$, preventing division by near-zero denominators that would cause catastrophic loss of significance.
-4. $\epsilon_{\text{sing}} = 10^{-12}$: Limits condition number $\kappa(B) \le 10^{12}$, retaining at least $\approx 4$ reliable significant digits.
-5. $\epsilon_{\text{zero}} = 10^{-15}$: Approximately $4.5 \times \epsilon_{\text{mach}}$, flushing subnormals and machine-level cancellation artifacts.
+#### Non-Destructive Zero-Threshold Safety Contract:
+- `zero_threshold` ($\epsilon_{\text{zero}} = 10^{-15}$) is a COMPARISON / DECISION threshold only (`std::abs(x) <= eps_zero`).
+- The solver NEVER destructively rewrites arbitrary finite computed floating-point numbers to $0.0$.
+- Strict classification:
+  1. **Stored Value**: Raw IEEE 754 float, preserved without silent alteration.
+  2. **Numerical Comparison to Zero**: Query predicate `is_zero(x)` for control flow and branch decisions.
+  3. **Structural Sparsity Zero**: Absence of entry in CSR pattern.
+  4. **Model Coefficient Zero**: Literal zero terms filtered during immutable model parsing.
+  5. **Mathematical Basic/Nonbasic Projection**: Nonbasic variables are algebraically defined to be zero in a basic solution ($x_N \equiv 0$). Basic variables $x_B$ retain their raw computed floating-point values.
 
 ---
 
@@ -522,27 +438,16 @@ struct LpSolution {
 
 ## 12. Independent LP Verifier & Certificate System
 
-An optimal solution returned by the solver is never accepted on trust. It must be validated by an independent verifier that evaluates the original, unstandardized `Model` using native Phase 2 SpMV routines.
+An optimal solution returned by the solver is validated by an independent verifier evaluating the unstandardized `Model` using native Phase 2 SpMV routines.
 
 ### 12.1 Independent Primal Verification
-Given candidate solution $x^* \in \mathbb{R}^n$:
-1. **Variable Bounds**:
-   $$\text{viol}_{\text{var}} = \max_{j=0}^{n-1} \max(0.0, \; lb_j - x_j^*, \; x_j^* - ub_j) \le \epsilon_{\text{feas}}$$
-2. **Constraint Bounds**:
-   Compute $r^* = A x^*$ using native Phase 2 SpMV.
-   $$\text{viol}_{\text{con}} = \max_{i=0}^{m-1} \max(0.0, \; l_i - r_i^*, \; r_i^* - u_i) \le \epsilon_{\text{feas}}$$
-3. **Objective Evaluation**:
-   Compute $f(x^*) = c^T x^* + c_0$. Assert $|f(x^*) - z^*| \le \epsilon_{\text{feas}} \max(1.0, |z^*|)$.
+1. **Variable Bounds**: $\text{viol}_{\text{var}} = \max_{j=0}^{n-1} \max(0.0, \; lb_j - x_j^*, \; x_j^* - ub_j) \le \epsilon_{\text{feas}}$.
+2. **Constraint Bounds**: Compute $r^* = A x^*$ via Phase 2 SpMV: $\text{viol}_{\text{con}} = \max_{i=0}^{m-1} \max(0.0, \; l_i - r_i^*, \; r_i^* - u_i) \le \epsilon_{\text{feas}}$.
+3. **Objective Evaluation**: Compute $f(x^*) = c^T x^* + c_0$. Assert $|f(x^*) - z^*| \le \epsilon_{\text{feas}} \max(1.0, |z^*|)$.
 
-### 12.2 Infeasibility Certificate (Farkas' Lemma)
-For standard form $Ax = b, x \ge 0$, infeasibility is certified by a dual vector $y \in \mathbb{R}^m$ satisfying:
-$$A^T y \ge -\epsilon_{\text{feas}}, \quad b^T y < -\epsilon_{\text{feas}}$$
-**Proof**: If $x \ge 0$ existed with $Ax = b$, then $y^T b = y^T A x = (A^T y)^T x \ge 0$, contradicting $b^T y < 0$.
-
-### 12.3 Unboundedness Certificate
-Unboundedness for $\min c^T x$ is certified by finding an extreme ray $d \in \mathbb{R}^n$ such that:
-$$A d = 0, \quad d \ge 0, \quad c^T d < -\epsilon_{\text{opt}}$$
-**Proof**: For any feasible $x^{(0)}$ and $\lambda \ge 0$, $x(\lambda) = x^{(0)} + \lambda d \ge 0$, $A x(\lambda) = b$, and $c^T x(\lambda) \to -\infty$ as $\lambda \to \infty$.
+### 12.2 Infeasibility & Unboundedness Certificates
+1. **Infeasibility (Farkas' Lemma)**: $y \in \mathbb{R}^m$ such that $A^T y \ge -\epsilon_{\text{feas}}, b^T y < -\epsilon_{\text{feas}}$.
+2. **Unboundedness**: Extreme ray $d \in \mathbb{R}^n$ with $A d = 0, d \ge 0, c^T d < -\epsilon_{\text{opt}}$.
 
 ---
 
@@ -559,7 +464,7 @@ Algorithm VertexEnumerationOracle(A, b, c, c0):
   3. For each combination J of m column indices from {0, ..., n-1}:
        a. Extract square m x m submatrix A_J.
        b. Compute LU factorization with full pivoting.
-       c. If rank(A_J) < m or cond(A_J) > 1e12: skip (singular / rank-deficient).
+       c. If rank(A_J) < m or any pivot <= singularity_threshold: skip.
        d. Solve A_J * x_J = b.
        e. If x_J >= -feas_tol for all components:
             Set full vector x with x_J and x_N = 0.
@@ -570,7 +475,6 @@ Algorithm VertexEnumerationOracle(A, b, c, c0):
   5. Check unboundedness by exploring recession rays along active edges.
   6. Return Optimal(OptimalValue, OptimalVertex).
 ```
-The test suite executes this independent oracle against every small benchmark LP, guaranteeing zero circular dependency between the test assertion and the simplex implementation.
 
 ---
 

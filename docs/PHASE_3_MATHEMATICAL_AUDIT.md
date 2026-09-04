@@ -1,7 +1,7 @@
 # Phase 3: LP Solver Core — Mathematical Audit & Theoretical Proofs
 
-**Document Version:** 1.1.0
-**Status:** COMPLETE AUDIT & VERIFICATION
+**Document Version:** 1.2.0
+**Status:** COMPLETE AUDIT & VERIFICATION (Final Gate)
 **Authoritative Baseline Commit:** `7bfa19a097b674d83ca79ce3886c1ed36db9eb33`
 **Repository:** `SIH26119-Indigenous-GPU-Accelerated-Optimization-Solver`
 
@@ -10,7 +10,7 @@
 ## 1. Audit Scope & Executive Summary
 This document provides the formal mathematical verification, algebraic proofs, and numerical-contract audit for the Phase 3 Linear Programming solver specification in [`docs/PHASE_3_LP_SPECIFICATION.md`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/docs/PHASE_3_LP_SPECIFICATION.md).
 
-Every equation, sign convention, variable transformation, row normalization, ratio test, dual-simplex relation, Phase I cleanup step, and numerical tolerance boundary has been audited from first principles.
+Every equation, sign convention, variable transformation, row normalization, ratio test, dual-simplex relation, Phase I cleanup step, singularity vs condition number distinction, and numerical decision threshold has been audited from first principles.
 
 ---
 
@@ -29,7 +29,7 @@ Every equation, sign convention, variable transformation, row normalization, rat
   - `using NonzeroCount = uint64_t;`
   - Sentinels: `kInvalidIndex = UINT32_MAX`, `kInvalidDimension = UINT32_MAX`, `kInvalidNonzeroCount = UINT64_MAX`.
 - **Audit Verification**:
-  In Phase 2, `Index` is `uint32_t` (unsigned 32-bit integer). Any prior narrative text mentioning `int64_t` was a typographical error in report descriptions and is strictly corrected. The Phase 3 specification uses `Index = uint32_t` and `Dimension = uint32_t` consistently.
+  In Phase 2, `Index` is `uint32_t` (unsigned 32-bit integer). The Phase 3 specification documents `Index = uint32_t`, `Dimension = uint32_t`, and `NonzeroCount = uint64_t` consistently.
   Conversions between `size_t` and `Index`/`Dimension` in Phase 3 MUST use checked helpers `to_index()` and `to_dimension()`.
 - **Audit Verdict**: **PASS** (Zero type mismatch across Phase 1, Phase 2, and Phase 3 specifications).
 
@@ -77,7 +77,7 @@ with $\bar{c}(s_i) = 0$, $\bar{c}(t_i) = 0$.
    This establishes a bijective correspondence between feasible solutions.
 
 3. **Objective & RHS Invariance**:
-   $\bar{c}(s_i) = 0$ and $\bar{c}(t_i) = 0$ ensures $z(\bar{x}) = c^T x$. Row 2 RHS is $u_i - l_i > 0$, already strictly non-negative. If $\tilde{l}_i < 0$ in Row 1, multiplying Row 1 by $-1$ normalizes RHS without affecting Row 2.
+   $\bar{c}(s_i) = 0$ and $\bar{c}(t_i) = 0$ ensures $z(\bar{x}) = c^T x$. Row 2 RHS is $u_i - l_i > 0$, guaranteed strictly non-negative. If $\tilde{l}_i < 0$ in Row 1, multiplying Row 1 by $-1$ normalizes RHS without affecting Row 2.
 4. **Degenerate / Limit Cases**:
    - $l_i = -\infty, u_i < +\infty \implies$ standard $\le$ constraint, 1 slack $s_i \ge 0$.
    - $l_i > -\infty, u_i = +\infty \implies$ standard $\ge$ constraint, 1 surplus $e_i \ge 0$.
@@ -88,7 +88,6 @@ with $\bar{c}(s_i) = 0$, $\bar{c}(t_i) = 0$.
 
 ### 2.3 Variable-Bound Transformations Proof
 Every variable class maps bijectively to non-negative standard variables:
-
 1. **$x_j \ge L_j$ (finite $L_j, U_j = +\infty$)**:
    $x_j = \bar{x}_k + L_j$ with $\bar{x}_k \ge 0$.
    $c_j x_j = c_j \bar{x}_k + c_j L_j \implies \bar{c}_k = c_j, \Delta \bar{c}_0 = c_j L_j$.
@@ -116,7 +115,7 @@ Every variable class maps bijectively to non-negative standard variables:
    Eliminated from standard variable vector.
    $b \leftarrow b - C_j A_{:, j}$, $\Delta \bar{c}_0 = c_j C_j$.
    Reconstruction: $x_j = C_j$.
-- **Audit Verdict**: **PASS** (All 8 bound cases verified algebraically).
+- **Audit Verdict**: **PASS** (All bound cases verified algebraically).
 
 ---
 
@@ -219,43 +218,53 @@ while primal feasibility is violated: there exists row $l$ such that $x_{B, l} <
 At Phase I termination:
 1. **$w^* > \epsilon_{\text{feas}}$**: The optimal sum of artificial variables is strictly positive. Since $a_i \ge 0$, no non-negative solution $x$ satisfies $Ax = b$. Primal LP is provably **INFEASIBLE**.
 2. **$w^* \le \epsilon_{\text{feas}}$**: Feasible. Nonbasic artificials are immediately dropped.
-3. **Degenerate Basic Artificials ($a_k$ in basis with $x_{B, k} \approx 0$)**:
-   Inspect tableau row $v^T = e_k^T B^{-1} \bar{A}$.
-   - **Case A**: $\exists j \in \mathcal{N}_{\text{struct}}$ such that $|v_j| > \epsilon_{\text{pivot}}$.
-     Perform a zero-step pivot ($\theta^* = 0$). Column $j$ enters the basis and artificial variable $a_k$ leaves. The basis remains feasible, objective does not change, and the artificial variable is eliminated.
-   - **Case B**: $|v_j| \le \epsilon_{\text{pivot}}$ for all nonbasic structural variables $j \in \mathcal{N}_{\text{struct}}$.
-     Then $e_k^T B^{-1} \bar{A} = 0^T$ and $e_k^T B^{-1} \bar{b} = x_{B, k} \approx 0$.
-     This implies that row $k$ of $\bar{A}$ is a linear combination of the other rows:
-     $$\bar{A}_{k, :} = \sum_{i \ne k} \lambda_i \bar{A}_{i, :}, \quad \bar{b}_k = \sum_{i \ne k} \lambda_i \bar{b}_i$$
-     Row $k$ is mathematically redundant. Deleting row $k$ from $\bar{A}$ and $\bar{b}$ reduces $\bar{m}$ by 1. The basis matrix dimension becomes $(\bar{m}-1) \times (\bar{m}-1)$. The feasible set is preserved identically.
+3. **Degenerate Basic Artificials ($a_k$ in basis with $x_{B, k} \le \epsilon_{\text{feas}}$)**:
+   The complete tableau row is:
+   $$x_{B, k} + \sum_{j \in \mathcal{N}_{\text{struct}}} \alpha_{k, j} \bar{x}_j + \sum_{j \in \mathcal{N}_{\text{art}}} \beta_{k, j} a_{j - \bar{n}} = (B^{-1} \bar{b})_k$$
+   where $\alpha_{k, j} = e_k^T B^{-1} \bar{A}_{:, j}$ and $\beta_{k, j} = (B^{-1})_{k, j - \bar{n}}$.
+   Restricting to the structural original problem ($a = 0$):
+   $$\sum_{j \in \mathcal{N}_{\text{struct}}} \alpha_{k, j} \bar{x}_j = (B^{-1} \bar{b})_k$$
+   - **Structural Pivot**: If $\exists j^* \in \mathcal{N}_{\text{struct}}$ with $|\alpha_{k, j^*}| > \epsilon_{\text{pivot}}$, perform a zero-step pivot ($\theta^* = 0$). Variable $j^*$ enters $\mathcal{B}$, artificial variable $B(k)$ leaves $\mathcal{B}$, basis dimension $\bar{m}$ is unchanged, and factorization is updated via rank-1 update.
+   - **Redundant Row**: If $|\alpha_{k, j}| \le \epsilon_{\text{pivot}}$ for all $j \in \mathcal{N}_{\text{struct}}$, then $(e_k^T B^{-1}) \bar{A} = 0^T$ and $(e_k^T B^{-1}) \bar{b} \approx 0$. Let $\lambda^T = e_k^T B^{-1} \ne 0$. This proves constraint row $k$ is a linear combination of other rows. Deleting row $k$ preserves the feasible set identically.
+   - **Nonzero Artificial Coefficients $\beta_{k, j}$**: The existence of non-zero coefficients on nonbasic artificial variables $\beta_{k, j} \ne 0$ relates solely to artificial variable linear combinations during Phase I and does NOT affect redundancy of the original problem constraints. Redundancy depends strictly on $\alpha_{k, j} = 0$ for all structural nonbasics.
+   - **Post-Deletion Rebuild**: Deleting row $k$ decrements $\bar{m} \to \bar{m}-1$. The basis factorization must be completely rebuilt for the reduced $(\bar{m}-1) \times (\bar{m}-1)$ system.
 - **Audit Verdict**: **PASS** (Phase I cleanup algorithm is fully specified, mathematically sound, and preserves polyhedral equivalence).
 
 ---
 
-### 2.9 BasisFactorization Numerical Contract Audit
+### 2.9 Singularity Threshold vs. Condition Number Audit
+- **Singularity Threshold ($\epsilon_{\text{sing}} = 10^{-12}$)**: A local pivot acceptance criterion during LU factorization. If during elimination, the maximum available pivot candidate in column $k$ satisfies $|U_{i,k}| \le \epsilon_{\text{sing}}$, no acceptable pivot exists. The basis is numerically singular at working precision, returning `StatusCode::NumericalFailure`.
+- **Condition Number Estimate**: A separate global diagnostic ($\kappa(B) = \|B\| \cdot \|B^{-1}\|$).
+- **Mathematical Distinction**: A pivot threshold $\epsilon_{\text{sing}}$ does NOT imply $\kappa(B) \le \epsilon_{\text{sing}}^{-1}$. (For example, triangular matrices with unit diagonal can have condition numbers growing exponentially as $2^{n-1}$). Conflating pivot thresholds with condition numbers is mathematically invalid and is strictly prohibited in the specification.
+- **Audit Verdict**: **PASS** (Singularity threshold and condition number clearly decoupled).
+
+---
+
+### 2.10 Non-Destructive Zero Threshold Safety Audit
+- `zero_threshold` ($\epsilon_{\text{zero}} = 10^{-15}$) is a COMPARISON / DECISION threshold only (`std::abs(x) <= eps_zero`).
+- The solver NEVER destructively rewrites arbitrary finite computed floating-point numbers to $0.0$.
+- Strict classification:
+  1. **Stored Value**: Raw IEEE 754 float, preserved without silent alteration.
+  2. **Numerical Comparison to Zero**: Query predicate `is_zero(x)` for control flow and branch decisions.
+  3. **Structural Sparsity Zero**: Absence of entry in CSR pattern.
+  4. **Model Coefficient Zero**: Literal zero terms filtered during immutable model parsing.
+  5. **Mathematical Basic/Nonbasic Projection**: Nonbasic variables are algebraically defined to be zero in a basic solution ($x_N \equiv 0$). Basic variables $x_B$ retain their raw computed floating-point values.
+- **Audit Verdict**: **PASS** (Zero threshold is strictly non-destructive).
+
+---
+
+### 2.11 BasisFactorization Numerical Contract Audit
 The abstract interface:
 - Operates on caller-owned workspaces (`DenseVector& scratch`).
 - Exposes `solve_primal(rhs, sol, scratch)` ($B x = rhs$) and `solve_dual(rhs, sol, scratch)` ($B^T y = rhs$).
 - Prohibits dense $B^{-1}$ storage.
-- Encapsulates refactorization thresholding and condition estimation $\kappa(B) \le 10^{12}$.
+- Encapsulates refactorization thresholding and condition estimation.
 - Matches Phase 2 zero-allocation hot-path contracts.
 - **Audit Verdict**: **PASS** (Conforms to Phase 2 frozen architecture).
 
 ---
 
-### 2.10 Numerical Tolerances Separation Audit
-The tolerances:
-- $\epsilon_{\text{feas}} = 10^{-8}$ ($\approx \sqrt{\epsilon_{\text{mach}}}$)
-- $\epsilon_{\text{opt}} = 10^{-8}$
-- $\epsilon_{\text{pivot}} = 10^{-10}$
-- $\epsilon_{\text{sing}} = 10^{-12}$
-- $\epsilon_{\text{zero}} = 10^{-15}$
-are mathematically and numerically defensible for double precision. They are encapsulated as configurable defaults within `SimplexTolerances`.
-- **Audit Verdict**: **PASS** (Tolerances separated across decision boundaries).
-
----
-
-### 2.11 Independent Optimality & Certificate Verifiers
+### 2.12 Independent Optimality & Certificate Verifiers
 - **Optimality**: Verifier independently computes $y = B^{-T} c_B$, recomputes $\bar{c}_N = c_N - N^T y$, and audits primal residuals $\|b - Ax\|_\infty \le \epsilon_{\text{feas}}$ and dual feasibility $\bar{c}_N \ge -\epsilon_{\text{opt}}$.
 - **Farkas Infeasibility Certificate**: $A^T y \ge 0, b^T y < 0$. Proven mutually exclusive with $Ax = b, x \ge 0$.
 - **Unbounded Ray Certificate**: $Ad = 0, d \ge 0, c^T d < 0$. Proven to generate a feasible ray on which $c^T x(\lambda) \to -\infty$.
@@ -263,7 +272,7 @@ are mathematically and numerically defensible for double precision. They are enc
 
 ---
 
-### 2.12 Independent Vertex Enumeration Oracle Audit
+### 2.13 Independent Vertex Enumeration Oracle Audit
 The oracle:
 - Directly enumerates all $\binom{n}{m}$ column subsets.
 - Handles $m = 0$ (unconstrained bounds).
@@ -275,7 +284,7 @@ The oracle:
 
 ---
 
-### 2.13 Test Matrix Concrete Definitions Audit
+### 2.14 Test Matrix Concrete Definitions Audit
 `TEST-LP-01` through `TEST-LP-16` are explicitly documented with exact numerical matrices, vectors, expected statuses, and analytical solutions.
 - **Audit Verdict**: **PASS** (All 16 test cases concretely defined).
 
@@ -283,14 +292,16 @@ The oracle:
 
 ## 3. Final Auditor Conclusion
 
-The updated Phase 3 LP specification in [`docs/PHASE_3_LP_SPECIFICATION.md`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/docs/PHASE_3_LP_SPECIFICATION.md) and the formal proofs in this document have resolved all mathematical questions:
+All mathematical derivations, transformations, certificates, tolerance boundaries, and architectural contracts have been audited, explicitly defined, and verified against Phase 1 and Phase 2 contracts:
 1. Index types are strictly verified (`uint32_t`).
 2. Two-sided row transformations are rigorously derived into standard equality form.
 3. Variable bound mappings are proved for all 8 cases.
 4. RHS sign normalization is proved invariant.
 5. Revised simplex and dual simplex equations and ratio tests are derived algebraically from first principles.
 6. Bland's rule determinism in floating point is accurately stated without overclaiming.
-7. Phase I cleanup and redundant constraint elimination are mathematically sound.
-8. Zero-allocation Phase 2 contracts are respected.
+7. Phase I cleanup and redundant constraint elimination are mathematically proved with exact structural vs artificial coefficient distinctions.
+8. Singularity threshold is defined as a local pivot acceptance criterion and decoupled from global condition number diagnostics.
+9. Zero threshold is established as a non-destructive comparison operator.
+10. Zero-allocation Phase 2 contracts are respected.
 
-**AUDIT RESULT: PASSED UNCONDITIONALLY.**
+**AUDIT RESULT: PASSED (Phase 3 Specification Gate Passed).**
