@@ -61,6 +61,14 @@ Status DenseVector::scale(Scalar alpha) noexcept {
     if (!is_finite_scalar(alpha)) {
         return Status::error(StatusCode::InvalidArgument, "Scale factor alpha must be a finite Scalar");
     }
+    // Transactional verification: ensure all products are finite before modifying state
+    for (const Scalar& elem : storage_) {
+        const Scalar res = elem * alpha;
+        if (!is_finite_scalar(res)) {
+            return Status::error(StatusCode::InvalidArgument,
+                "DenseVector::scale produced non-finite element (arithmetic overflow)");
+        }
+    }
     for (Scalar& elem : storage_) {
         elem *= alpha;
     }
@@ -75,9 +83,18 @@ Status DenseVector::axpy(Scalar alpha, const DenseVector& x) noexcept {
         return Status::error(StatusCode::InvalidArgument, "Dimension mismatch in DenseVector::axpy");
     }
     const Scalar* x_data = x.data();
-    Scalar* y_data = storage_.data();
+    const Scalar* y_data = storage_.data();
+    // Transactional verification: ensure all results are finite before modifying state
     for (Dimension i = 0; i < size_; ++i) {
-        y_data[i] += alpha * x_data[i];
+        const Scalar res = alpha * x_data[i] + y_data[i];
+        if (!is_finite_scalar(res)) {
+            return Status::error(StatusCode::InvalidArgument,
+                "DenseVector::axpy produced non-finite element (arithmetic overflow)");
+        }
+    }
+    Scalar* y_mut = storage_.data();
+    for (Dimension i = 0; i < size_; ++i) {
+        y_mut[i] += alpha * x_data[i];
     }
     return Status::ok();
 }

@@ -140,6 +140,33 @@ void test_non_finite_rejection() {
     CHECK(!mat.fill(inf_val).is_ok(), "fill with Inf must fail");
 }
 
+void test_transactional_multiply_overflow() {
+    std::cout << "[TEST] DenseMatrix Transactional Multiply on Overflow\n";
+    // 2 rows, 1 col
+    // A[0, 0] = 1.0
+    // A[1, 0] = 1e308
+    auto mat = sih26119::DenseMatrix::create(2, 1, 0.0).value();
+    CHECK(mat.set(0, 0, 1.0).is_ok(), "set(0, 0)");
+    CHECK(mat.set(1, 0, 1e308).is_ok(), "set(1, 0)");
+
+    // x = [1e308]
+    // Row 0: 1.0 * 1e308 = 1e308 (finite)
+    // Row 1: 1e308 * 1e308 = +Inf (overflow)
+    auto x = sih26119::DenseVector::create(1, 1e308).value();
+
+    // Destination vector initialized to [77.0, 88.0]
+    auto y = sih26119::DenseVector::create(2, 0.0).value();
+    CHECK(y.set(0, 77.0).is_ok(), "y.set(0)");
+    CHECK(y.set(1, 88.0).is_ok(), "y.set(1)");
+
+    auto status = mat.multiply(x, y);
+    CHECK(!status.is_ok(), "multiply must fail with error on overflow in row 1");
+
+    // Transactional verification: y must remain byte-for-byte / value-for-value unchanged!
+    CHECK(y[0] == 77.0, "y[0] must remain 77.0 (unmodified) despite row 0 being finite");
+    CHECK(y[1] == 88.0, "y[1] must remain 88.0 (unmodified)");
+}
+
 } // namespace
 
 int main() {
@@ -152,6 +179,7 @@ int main() {
     test_matrix_vector_multiplication();
     test_dimension_mismatch_and_aliasing();
     test_non_finite_rejection();
+    test_transactional_multiply_overflow();
 
     if (g_failures > 0) {
         std::cerr << "\n[RESULT] FAILED with " << g_failures << " failure(s).\n";

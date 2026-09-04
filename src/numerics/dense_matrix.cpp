@@ -61,19 +61,14 @@ Status DenseMatrix::multiply(const DenseVector& x, DenseVector& y) const noexcep
         return Status::error(StatusCode::InvalidArgument, "x and y cannot alias in DenseMatrix::multiply");
     }
 
-    // Zero out output vector y
-    auto fill_status = y.fill(kScalarZero);
-    if (!fill_status.is_ok()) {
-        return fill_status;
-    }
-
     if (rows_ == 0 || cols_ == 0) {
-        return Status::ok();
+        return y.fill(kScalarZero);
     }
 
     const Scalar* x_data = x.data();
-    Scalar* y_data = y.data();
     const Scalar* mat_data = storage_.data();
+
+    std::vector<Scalar> temp(static_cast<std::size_t>(rows_), kScalarZero);
 
     // Column-major traversal: contiguous memory reads in inner loop
     for (Dimension j = 0; j < cols_; ++j) {
@@ -83,15 +78,20 @@ Status DenseMatrix::multiply(const DenseVector& x, DenseVector& y) const noexcep
         }
         const Scalar* col_data = mat_data + static_cast<std::size_t>(j) * rows_;
         for (Dimension i = 0; i < rows_; ++i) {
-            y_data[i] += col_data[i] * xj;
+            temp[i] += col_data[i] * xj;
         }
     }
 
-    // Verify output finiteness
+    // Verify output finiteness transactionally before committing to y
     for (Dimension i = 0; i < rows_; ++i) {
-        if (!is_finite_scalar(y_data[i])) {
-            return Status::error(StatusCode::InvalidArgument, "DenseMatrix::multiply produced non-finite value in y");
+        if (!is_finite_scalar(temp[i])) {
+            return Status::error(StatusCode::InvalidArgument, "DenseMatrix::multiply produced non-finite value (arithmetic overflow)");
         }
+    }
+
+    Scalar* y_data = y.data();
+    for (Dimension i = 0; i < rows_; ++i) {
+        y_data[i] = temp[i];
     }
 
     return Status::ok();

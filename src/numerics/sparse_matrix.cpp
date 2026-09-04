@@ -49,6 +49,10 @@ Result<SparseMatrix> SparseMatrix::from_triplets(
     for (const auto& t : sorted) {
         if (!accumulated.empty() && accumulated.back().row == t.row && accumulated.back().col == t.col) {
             accumulated.back().value += t.value;
+            if (!is_finite_scalar(accumulated.back().value)) {
+                return Status::error(StatusCode::InvalidArgument,
+                    "Duplicate triplet accumulation resulted in arithmetic overflow (non-finite value)");
+            }
         } else {
             accumulated.push_back(t);
         }
@@ -173,7 +177,7 @@ Status SparseMatrix::multiply(const DenseVector& x, DenseVector& y) const noexce
     }
 
     const Scalar* x_data = x.data();
-    Scalar* y_data = y.data();
+    std::vector<Scalar> temp(static_cast<std::size_t>(rows_), kScalarZero);
 
     for (Dimension i = 0; i < rows_; ++i) {
         const NonzeroCount start = row_ptr_[i];
@@ -184,9 +188,15 @@ Status SparseMatrix::multiply(const DenseVector& x, DenseVector& y) const noexce
             sum += values_[idx] * x_data[col_idx_[idx]];
         }
         if (!is_finite_scalar(sum)) {
-            return Status::error(StatusCode::InvalidArgument, "SpMV produced non-finite result in y");
+            return Status::error(StatusCode::InvalidArgument,
+                "SparseMatrix::multiply produced non-finite result (arithmetic overflow)");
         }
-        y_data[i] = sum;
+        temp[i] = sum;
+    }
+
+    Scalar* y_data = y.data();
+    for (Dimension i = 0; i < rows_; ++i) {
+        y_data[i] = temp[i];
     }
 
     return Status::ok();
@@ -226,7 +236,7 @@ Status SparseMatrix::residual(const DenseVector& b, const DenseVector& x, DenseV
 
     const Scalar* b_data = b.data();
     const Scalar* x_data = x.data();
-    Scalar* r_data = r.data();
+    std::vector<Scalar> temp(static_cast<std::size_t>(rows_), kScalarZero);
 
     for (Dimension i = 0; i < rows_; ++i) {
         const NonzeroCount start = row_ptr_[i];
@@ -238,9 +248,15 @@ Status SparseMatrix::residual(const DenseVector& b, const DenseVector& x, DenseV
         }
         const Scalar res_val = b_data[i] - ax_i;
         if (!is_finite_scalar(res_val)) {
-            return Status::error(StatusCode::InvalidArgument, "SparseMatrix::residual produced non-finite residual");
+            return Status::error(StatusCode::InvalidArgument,
+                "SparseMatrix::residual produced non-finite residual (arithmetic overflow)");
         }
-        r_data[i] = res_val;
+        temp[i] = res_val;
+    }
+
+    Scalar* r_data = r.data();
+    for (Dimension i = 0; i < rows_; ++i) {
+        r_data[i] = temp[i];
     }
 
     return Status::ok();

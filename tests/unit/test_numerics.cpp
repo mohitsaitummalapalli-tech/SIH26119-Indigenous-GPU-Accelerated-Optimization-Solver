@@ -90,10 +90,14 @@ void test_deterministic_property_tests() {
 
     const std::vector<TestConfig> configs = {
         {1, 1, 1.0},
+        {2, 3, 0.75},
+        {3, 2, 0.75},
         {5, 5, 0.4},
+        {8, 12, 0.25},
+        {12, 8, 0.25},
         {10, 10, 0.2},
         {20, 12, 0.15},
-        {15, 25, 0.25},
+        {15, 25, 0.2},
         {30, 30, 0.05}
     };
 
@@ -188,6 +192,7 @@ void test_deterministic_property_tests() {
         }
     }
 
+    CHECK(cases_run == 50, "Deterministic property test count must be exactly 50");
     std::cout << "  [INFO] Successfully completed " << cases_run << " randomized property verification cases.\n";
 }
 

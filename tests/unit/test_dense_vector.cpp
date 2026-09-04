@@ -178,6 +178,29 @@ void test_large_value_norm_stability() {
     CHECK(sih26119::approx_equal(n2.value(), 5.0 * large_val), "norm2([3e200, 4e200]) == 5e200");
 }
 
+void test_overflow_and_transactional_consistency() {
+    std::cout << "[TEST] Overflow and Transactional Consistency in DenseVector\n";
+    // A. scale overflow
+    const std::vector<sih26119::Scalar> x_data = {5.0, 1e308};
+    auto v_scale = sih26119::DenseVector::from_values(x_data).value();
+    auto scale_status = v_scale.scale(10.0);
+    CHECK(!scale_status.is_ok(), "v.scale(10.0) with 1e308 must fail with error");
+    // Verify transactional consistency: v_scale[0] must NOT be modified to 50.0!
+    CHECK(v_scale[0] == 5.0, "v_scale[0] must remain 5.0 after scale failure");
+    CHECK(v_scale[1] == 1e308, "v_scale[1] must remain 1e308 after scale failure");
+
+    // B. axpy overflow
+    const std::vector<sih26119::Scalar> y_data = {2.0, 1e308};
+    const std::vector<sih26119::Scalar> x_axpy_data = {1.0, 1e308};
+    auto y = sih26119::DenseVector::from_values(y_data).value();
+    auto x = sih26119::DenseVector::from_values(x_axpy_data).value();
+    auto axpy_status = y.axpy(1.0, x);
+    CHECK(!axpy_status.is_ok(), "y.axpy(1.0, x) with 1e308 + 1e308 must fail with error");
+    // Verify transactional consistency: y[0] must NOT be modified to 3.0!
+    CHECK(y[0] == 2.0, "y[0] must remain 2.0 after axpy failure");
+    CHECK(y[1] == 1e308, "y[1] must remain 1e308 after axpy failure");
+}
+
 } // namespace
 
 int main() {
@@ -191,6 +214,7 @@ int main() {
     test_dimension_mismatch_rejection();
     test_non_finite_rejection();
     test_large_value_norm_stability();
+    test_overflow_and_transactional_consistency();
 
     if (g_failures > 0) {
         std::cerr << "\n[RESULT] FAILED with " << g_failures << " failure(s).\n";

@@ -129,3 +129,17 @@ $$\text{abs\_tol} = 10^{-12}, \quad \text{rel\_tol} = 10^{-12}$$
 
 Approximate zero check:
 $$\text{approx\_zero}(a) \iff |a| \le \text{abs\_tol}$$
+
+### 3.3 Operational Numerical Overflow Policy & Transactional Consistency
+The numerical layer strictly distinguishes between two classes of non-finite conditions:
+1. **Invalid Non-Finite Input**: Checked APIs reject vectors, scalars, or matrices containing `NaN`, `+Inf`, or `-Inf` immediately upon entry with `StatusCode::InvalidArgument`.
+2. **Finite Input Producing Non-Finite Output via Overflow**: When valid finite inputs through arithmetic operations (such as `scale`, `axpy`, `dot`, `DenseMatrix::multiply`, `SparseMatrix::multiply`, `SparseMatrix::residual`, or CSR duplicate triplet accumulation) produce an infinite or NaN result due to floating-point overflow, the operation detects the condition and returns an explicit `StatusCode::InvalidArgument`.
+
+#### Transactional State Consistency Contract:
+No operation is permitted to leave a numerical object in an undocumented, partially modified state upon encountering arithmetic overflow:
+- `DenseVector::scale(alpha)`: Validates that all scaled elements remain finite prior to mutating state. If an overflow occurs, `storage_` is left completely unmodified.
+- `DenseVector::axpy(alpha, x)`: Validates that all resulting elements $y_i = \alpha x_i + y_i$ remain finite prior to mutating state. If an overflow occurs, $y$ is left completely unmodified.
+- `DenseMatrix::multiply(x, y)`: Computes the product into an intermediate buffer and verifies finiteness before committing to $y$. If an overflow occurs, $y$ is left unmodified.
+- `SparseMatrix::multiply(x, y)`: Computes the SpMV into an intermediate buffer and verifies finiteness before committing to $y$. If an overflow occurs, $y$ is left unmodified.
+- `SparseMatrix::residual(b, x, r)`: Computes the residual into an intermediate buffer and verifies finiteness before committing to $r$. If an overflow occurs, $r$ is left unmodified.
+- `SparseMatrix::from_triplets`: During duplicate coordinate accumulation $\sum v$, each addition is verified immediately. If an accumulated coordinate overflows to $\pm\infty$, construction fails immediately with `StatusCode::InvalidArgument`.

@@ -209,6 +209,51 @@ void test_invalid_input_and_aliasing() {
     CHECK(!mat.residual(b, v, v).is_ok(), "Aliased residual(b, v, v) must fail");
 }
 
+void test_triplet_accumulation_overflow_rejection() {
+    std::cout << "[TEST] Triplet Duplicate Accumulation Overflow Rejection\n";
+    // Duplicate triplets at (0, 0) with values 1e308 + 1e308 -> overflow to +Inf
+    const std::vector<sih26119::Triplet> overflow_triplets = {
+        {0, 0, 1e308},
+        {0, 0, 1e308}
+    };
+    auto res = sih26119::SparseMatrix::from_triplets(2, 2, overflow_triplets);
+    CHECK(!res.ok(), "from_triplets with duplicate accumulation overflow must fail with error");
+}
+
+void test_transactional_sparse_multiply_and_residual_overflow() {
+    std::cout << "[TEST] SparseMatrix Transactional Multiply & Residual on Overflow\n";
+    // 2 rows, 1 col: (0, 0, 1.0) and (1, 0, 1e308)
+    const std::vector<sih26119::Triplet> triplets = {
+        {0, 0, 1.0},
+        {1, 0, 1e308}
+    };
+    auto mat = sih26119::SparseMatrix::from_triplets(2, 1, triplets).value();
+    auto x = sih26119::DenseVector::create(1, 1e308).value();
+
+    // Multiply test:
+    // Row 0: 1.0 * 1e308 = 1e308 (finite)
+    // Row 1: 1e308 * 1e308 = +Inf (overflow)
+    auto y = sih26119::DenseVector::create(2, 0.0).value();
+    CHECK(y.set(0, 33.0).is_ok(), "y.set(0)");
+    CHECK(y.set(1, 44.0).is_ok(), "y.set(1)");
+
+    auto status_mul = mat.multiply(x, y);
+    CHECK(!status_mul.is_ok(), "SparseMatrix::multiply must fail on row 1 overflow");
+    CHECK(y[0] == 33.0, "y[0] must remain 33.0 (unmodified) despite row 0 being finite");
+    CHECK(y[1] == 44.0, "y[1] must remain 44.0 (unmodified)");
+
+    // Residual test: r = b - Ax
+    auto b = sih26119::DenseVector::create(2, 0.0).value();
+    auto r = sih26119::DenseVector::create(2, 0.0).value();
+    CHECK(r.set(0, 55.0).is_ok(), "r.set(0)");
+    CHECK(r.set(1, 66.0).is_ok(), "r.set(1)");
+
+    auto status_res = mat.residual(b, x, r);
+    CHECK(!status_res.is_ok(), "SparseMatrix::residual must fail on row 1 overflow");
+    CHECK(r[0] == 55.0, "r[0] must remain 55.0 (unmodified) despite row 0 being finite");
+    CHECK(r[1] == 66.0, "r[1] must remain 66.0 (unmodified)");
+}
+
 } // namespace
 
 int main() {
@@ -221,6 +266,8 @@ int main() {
     test_unsorted_triplets_and_column_ordering();
     test_spmv_against_independent_dense_oracle();
     test_invalid_input_and_aliasing();
+    test_triplet_accumulation_overflow_rejection();
+    test_transactional_sparse_multiply_and_residual_overflow();
 
     if (g_failures > 0) {
         std::cerr << "\n[RESULT] FAILED with " << g_failures << " failure(s).\n";
