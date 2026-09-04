@@ -21,9 +21,9 @@ enum class FactorizationState : uint8_t {
 struct FactorizationTolerances {
     Scalar singularity_tol{1e-12};    ///< Min acceptable diagonal pivot |U_kk|
     Scalar residual_tol{1e-8};        ///< Relative solve backward error ceiling
-    Scalar max_growth_tol{1e12};      ///< Maximum permissible pivot growth
-    Scalar condition_ceiling{1e13};   ///< Operational ill-conditioning diagnostic threshold
-    Scalar fact_residual_tol{1e-10};  ///< Scale-aware factorization quality tolerance
+    Scalar max_growth_tol{1e12};      ///< Operational safeguard against extreme growth (empirical cutoff, not a stability theorem)
+    Scalar condition_ceiling{1e13};   ///< Operational diagnostic signal for ill-conditioning (non-terminating diagnostic)
+    Scalar fact_residual_tol{1e-12};  ///< Scale-aware factorization quality tolerance (reconciled default: 1e-12)
 };
 
 /**

@@ -105,20 +105,31 @@ Violations are caught and return `StatusCode::InvalidArgument`.
 - Solves inspect `basis_view_->basis().version() == basis_version_`.
 - If the basis has been modified (e.g. by column replacement), subsequent solves are rejected with `StatusCode::InconsistentModel` without modifying `solution`.
 
-### 3.5 Scale-Aware Factorization Check
+### 3.5 Scale-Aware Factorization Check & Reconciled Tolerances
 - An independent verification method `compute_factorization_residual()` validates:
   $$\|P B - L U\|_\infty \le \tau_{\text{fact}} \left( \|P B\|_\infty + \|L U\|_\infty \right)$$
   ensuring numerical integrity of the computed factors.
+- **Tolerance Reconciliation:** Default `fact_residual_tol` is explicitly set to `1e-12` (reconciled with the authoritative specification). Double precision arithmetic yields residuals on the order of $10^{-16}$, making $10^{-12}$ a rigorous quality gate that guards against any precision loss or factor inconsistency.
+- **Source Independence:** The factorization residual reads $P B$ directly from the authoritative `BasisMatrixView` (querying the original CSR matrix entries with zero allocations) rather than using internal dense buffers or LU data.
 
-### 3.6 Diagnostic Condition Number Estimation
-- Implements Hager-Higham 1-norm estimator $\kappa^*(B) = \|B\|_1 \|B^{-1}\|_1$ using 5 forward/backward dual substitutions.
-- Condition estimate is maintained purely as an operational diagnostic; it never fails a factorization on its own without residual evidence.
+### 3.6 Independent Solve Residual Verification (FTRAN & BTRAN)
+- Both primal solve ($B x = \text{rhs}$) and dual transpose solve ($B^T y = \text{rhs}$) compute backward residuals directly against the authoritative `BasisMatrixView`.
+- Coefficients $B_{i, j}$ are queried on-the-fly via `BasisMatrixView::get(row, col)`, executing binary searches across CSR column arrays with zero dynamic allocations on the hot path.
+- The verification does not rely on `b_dense_` or reconstruct $B$ from LU factors.
+
+### 3.7 Numerical Norm Overflow Safety
+- Norm accumulations ($\|B\|_\infty$, $\|B\|_1$, residual norms, and $L U$ product accumulations) are strictly guarded against $+ \infty$, $\text{NaN}$, and non-finite intermediate values.
+- Non-finite values or arithmetic overflows trigger graceful returns with `StatusCode::NumericalFailure` and transition factorization state cleanly to `FactorizationState::Failed`.
+
+### 3.8 Pivot-Growth & Condition Number Policy
+- **Pivot Growth Limit (`max_growth_tol = 1e12`):** Documented strictly as an operational safeguard against extreme growth, not a general numerical stability theorem.
+- **Diagnostic Condition Estimation:** The Hager-Higham 1-norm condition estimator $\kappa^*(B) = \|B\|_1 \|B^{-1}\|_1$ is purely diagnostic and never terminates a factorization or solve prematurely on its own without residual evidence.
 
 ---
 
 ## 4. Test Matrix & Validation Results
 
-The implementation is verified by a test suite consisting of 24 fixtures and 50 randomized property tests:
+The implementation is verified by a test suite consisting of 30 fixtures and 50 randomized property tests:
 
 | Test ID | Description | Result |
 | :--- | :--- | :--- |
@@ -145,7 +156,13 @@ The implementation is verified by a test suite consisting of 24 fixtures and 50 
 | `TEST-FACT-21` | Transactional rollback: destination unmodified on failure | PASS |
 | `TEST-FACT-22` | Factorization residual $\|P B - L U\|_\infty$ verification | PASS |
 | `TEST-FACT-23` | Deterministic pivoting repeatability across runs | PASS |
-| `TEST-FACT-24` | Agreement with independent complete-pivoting oracle | PASS |
+| `TEST-FACT-24` | Agreement and residual verification with independent complete-pivoting oracle | PASS |
+| `TEST-FACT-25` | Reconciled tolerance defaults verified (`fact_residual_tol = 1e-12`) | PASS |
+| `TEST-FACT-26` | Arithmetic overflow and non-finite input safety | PASS |
+| `TEST-FACT-27` | Independent residual verification directly against `BasisMatrixView` | PASS |
+| `TEST-FACT-28` | Transpose solve correctness under non-trivial row permutations ($P \ne I$) | PASS |
+| `TEST-FACT-29` | Transactional failure preservation across all error paths | PASS |
+| `TEST-FACT-30` | Badly scaled nonsingular basis solve & diagnostic condition validation | PASS |
 | **Property Tests** | 50 randomized non-diagonally dominant test cases (Seed `0x3C3C3C`) | PASS |
 
 ### Complete Test Suite Summary

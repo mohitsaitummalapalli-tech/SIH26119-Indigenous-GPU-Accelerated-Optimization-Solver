@@ -73,7 +73,7 @@ Status BasisFactorization::factorize(
         }
     }
 
-    // Compute ||B||_inf, ||B||_1, and initial max element magnitude
+    // Compute ||B||_inf, ||B||_1, and initial max element magnitude with overflow safety
     Scalar b_max = 0.0;
     Scalar b_norm_inf = 0.0;
     for (Index i = 0; i < m; ++i) {
@@ -85,9 +85,17 @@ Status BasisFactorization::factorize(
                 b_max = abs_val;
             }
         }
+        if (!is_finite_scalar(row_sum)) {
+            invalidate();
+            return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow encountered in basis row norm calculation");
+        }
         if (row_sum > b_norm_inf) {
             b_norm_inf = row_sum;
         }
+    }
+    if (!is_finite_scalar(b_norm_inf)) {
+        invalidate();
+        return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow in basis infinity norm");
     }
 
     Scalar b_norm_1 = 0.0;
@@ -96,9 +104,17 @@ Status BasisFactorization::factorize(
         for (Index i = 0; i < m; ++i) {
             col_sum += std::abs(b_dense[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * m_sz]);
         }
+        if (!is_finite_scalar(col_sum)) {
+            invalidate();
+            return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow in basis 1-norm calculation");
+        }
         if (col_sum > b_norm_1) {
             b_norm_1 = col_sum;
         }
+    }
+    if (!is_finite_scalar(b_norm_1)) {
+        invalidate();
+        return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow in basis 1-norm");
     }
 
     std::vector<Scalar> lu_data = b_dense;
@@ -150,11 +166,19 @@ Status BasisFactorization::factorize(
         for (Index i = k + 1; i < m; ++i) {
             const std::size_t i_idx = static_cast<std::size_t>(i) + k_col_offset;
             const Scalar mult = lu_data[i_idx] / diag;
+            if (!is_finite_scalar(mult)) {
+                invalidate();
+                return Status::error(StatusCode::NumericalFailure, "Non-finite multiplier generated during elimination");
+            }
             lu_data[i_idx] = mult; // Store L(i, k) below diagonal
 
             for (Index j = k + 1; j < m; ++j) {
                 const std::size_t j_col_offset = static_cast<std::size_t>(j) * m_sz;
                 const Scalar updated = lu_data[static_cast<std::size_t>(i) + j_col_offset] - mult * lu_data[static_cast<std::size_t>(k) + j_col_offset];
+                if (!is_finite_scalar(updated)) {
+                    invalidate();
+                    return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow or non-finite intermediate entry during elimination");
+                }
                 lu_data[static_cast<std::size_t>(i) + j_col_offset] = updated;
 
                 const Scalar entry_mag = std::abs(updated);
@@ -279,15 +303,28 @@ Status BasisFactorization::solve(
     for (Index i = 0; i < m_; ++i) {
         Scalar b_x_i = 0.0;
         for (Index j = 0; j < m_; ++j) {
-            b_x_i += b_dense_[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * m_sz] * scratch[j];
+            const auto b_ij_res = basis_view_->get(i, j);
+            if (!b_ij_res.is_ok()) {
+                return b_ij_res.status();
+            }
+            b_x_i += b_ij_res.value() * scratch[j];
+        }
+        if (!is_finite_scalar(b_x_i)) {
+            return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow during independent B x residual evaluation");
         }
         const Scalar res = std::abs(b_x_i - rhs[i]);
+        if (!is_finite_scalar(res)) {
+            return Status::error(StatusCode::NumericalFailure, "Non-finite residual encountered in solve verification");
+        }
         if (res > max_res) {
             max_res = res;
         }
     }
 
     const Scalar denom = b_norm_inf_ * x_norm_inf + rhs_norm_inf;
+    if (!is_finite_scalar(denom)) {
+        return Status::error(StatusCode::NumericalFailure, "Non-finite residual denominator in solve verification");
+    }
     if (denom == 0.0) {
         if (max_res != 0.0) {
             return Status::error(StatusCode::NumericalFailure, "Zero-denominator residual check failed for solve");
@@ -393,18 +430,31 @@ Status BasisFactorization::solve_transpose(
     for (Index j = 0; j < m_; ++j) {
         Scalar b_t_y_j = 0.0;
         for (Index i = 0; i < m_; ++i) {
-            // (B^T)_{j, i} = B_{i, j} = b_dense[i + j * m_sz]
+            // (B^T)_{j, i} = B_{i, j} accessed directly from BasisMatrixView
             // y[i] = scratch[pi_r_inv_[i]]
             const Index v_idx = pi_r_inv_[static_cast<std::size_t>(i)];
-            b_t_y_j += b_dense_[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * m_sz] * scratch[v_idx];
+            const auto b_ij_res = basis_view_->get(i, j);
+            if (!b_ij_res.is_ok()) {
+                return b_ij_res.status();
+            }
+            b_t_y_j += b_ij_res.value() * scratch[v_idx];
+        }
+        if (!is_finite_scalar(b_t_y_j)) {
+            return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow during independent B^T y residual evaluation");
         }
         const Scalar res = std::abs(b_t_y_j - rhs[j]);
+        if (!is_finite_scalar(res)) {
+            return Status::error(StatusCode::NumericalFailure, "Non-finite residual encountered in transpose solve verification");
+        }
         if (res > max_res) {
             max_res = res;
         }
     }
 
     const Scalar denom = b_norm_inf_ * y_norm_inf + rhs_norm_inf;
+    if (!is_finite_scalar(denom)) {
+        return Status::error(StatusCode::NumericalFailure, "Non-finite residual denominator in transpose solve verification");
+    }
     if (denom == 0.0) {
         if (max_res != 0.0) {
             return Status::error(StatusCode::NumericalFailure, "Zero-denominator residual check failed for transpose solve");
@@ -444,7 +494,12 @@ Result<Scalar> BasisFactorization::compute_factorization_residual() const {
         Scalar lu_row_sum = 0.0;
 
         for (Index j = 0; j < m_; ++j) {
-            const Scalar pb_ij = b_dense_[static_cast<std::size_t>(orig_row) + static_cast<std::size_t>(j) * m_sz];
+            // Read B independently from authoritative BasisMatrixView
+            const auto pb_res = basis_view_->get(orig_row, j);
+            if (!pb_res.is_ok()) {
+                return pb_res.status();
+            }
+            const Scalar pb_ij = pb_res.value();
             pb_row_sum += std::abs(pb_ij);
 
             // Compute (L * U)_{i, j} = sum_{k=0}^{min(i, j)} L_{i, k} * U_{k, j}
@@ -456,8 +511,20 @@ Result<Scalar> BasisFactorization::compute_factorization_residual() const {
                 lu_ij += l_ik * u_kj;
             }
 
+            if (!is_finite_scalar(lu_ij)) {
+                return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow in LU product evaluation");
+            }
+
             lu_row_sum += std::abs(lu_ij);
-            row_diff += std::abs(pb_ij - lu_ij);
+            const Scalar diff = std::abs(pb_ij - lu_ij);
+            if (!is_finite_scalar(diff)) {
+                return Status::error(StatusCode::NumericalFailure, "Non-finite difference in factorization residual");
+            }
+            row_diff += diff;
+        }
+
+        if (!is_finite_scalar(row_diff) || !is_finite_scalar(pb_row_sum) || !is_finite_scalar(lu_row_sum)) {
+            return Status::error(StatusCode::NumericalFailure, "Arithmetic overflow in factorization row residual accumulation");
         }
 
         if (row_diff > max_row_diff) {
@@ -472,6 +539,9 @@ Result<Scalar> BasisFactorization::compute_factorization_residual() const {
     }
 
     const Scalar denom = pb_norm_inf + lu_norm_inf;
+    if (!is_finite_scalar(denom)) {
+        return Status::error(StatusCode::NumericalFailure, "Non-finite denominator in factorization residual check");
+    }
     if (denom == 0.0) {
         if (max_row_diff != 0.0) {
             return Status::error(StatusCode::NumericalFailure, "Zero-denominator factorization residual check failed");
@@ -523,6 +593,10 @@ void BasisFactorization::estimate_condition_1norm() {
         for (Index i = 0; i < m_; ++i) {
             gamma += std::abs(w[static_cast<std::size_t>(i)]);
         }
+        if (!is_finite_scalar(gamma)) {
+            condition_estimate_ = std::numeric_limits<Scalar>::infinity();
+            return;
+        }
 
         // xi_i = sign(w_i)
         std::vector<Scalar> xi(m_sz);
@@ -564,6 +638,11 @@ void BasisFactorization::estimate_condition_1norm() {
             z_dot_x += z_val * x[static_cast<std::size_t>(orig_row)];
         }
 
+        if (!is_finite_scalar(z_norm_inf) || !is_finite_scalar(z_dot_x)) {
+            condition_estimate_ = std::numeric_limits<Scalar>::infinity();
+            return;
+        }
+
         if (z_norm_inf <= z_dot_x || iter == max_iters - 1) {
             break;
         }
@@ -574,7 +653,9 @@ void BasisFactorization::estimate_condition_1norm() {
     }
 
     condition_estimate_ = b_norm_1_ * gamma;
-    if (!is_finite_scalar(condition_estimate_) || condition_estimate_ < 1.0) {
+    if (!is_finite_scalar(condition_estimate_)) {
+        condition_estimate_ = std::numeric_limits<Scalar>::infinity();
+    } else if (condition_estimate_ < 1.0) {
         condition_estimate_ = 1.0;
     }
 }

@@ -929,6 +929,10 @@ void test_fact_24_independent_oracle_agreement() {
     for (Dimension i = 0; i < 4; ++i) {
         assert(std::abs(sol[i] - oracle_sol[static_cast<std::size_t>(i)]) < 1e-10);
     }
+    std::vector<Scalar> sol_vec(4);
+    for (Dimension i = 0; i < 4; ++i) sol_vec[i] = sol[i];
+    const Scalar oracle_res = CompletePivotingOracle::compute_residual(4, M, sol_vec, rhs_data);
+    assert(oracle_res < 1e-12);
 
     // Transpose solve
     assert(fact.solve_transpose(rhs, sol, scr).is_ok());
@@ -936,8 +940,253 @@ void test_fact_24_independent_oracle_agreement() {
     for (Dimension i = 0; i < 4; ++i) {
         assert(std::abs(sol[i] - oracle_trans[static_cast<std::size_t>(i)]) < 1e-10);
     }
+    std::vector<Scalar> sol_trans_vec(4);
+    for (Dimension i = 0; i < 4; ++i) sol_trans_vec[i] = sol[i];
+    const Scalar oracle_trans_res = CompletePivotingOracle::compute_transpose_residual(4, M, sol_trans_vec, rhs_data);
+    assert(oracle_trans_res < 1e-12);
 
-    std::cout << "  [PASS] TEST-FACT-24: independent oracle agreement\n";
+    std::cout << "  [PASS] TEST-FACT-24: independent oracle agreement and residual verification\n";
+}
+
+void test_fact_25_tolerance_default() {
+    FactorizationTolerances tols;
+    assert(tols.fact_residual_tol == 1e-12);
+    assert(tols.residual_tol == 1e-8);
+    assert(tols.singularity_tol == 1e-12);
+    assert(tols.max_growth_tol == 1e12);
+    assert(tols.condition_ceiling == 1e13);
+
+    BasisFactorization fact;
+    assert(fact.tolerances().fact_residual_tol == 1e-12);
+    assert(fact.tolerances().residual_tol == 1e-8);
+    assert(fact.tolerances().singularity_tol == 1e-12);
+    assert(fact.tolerances().max_growth_tol == 1e12);
+    assert(fact.tolerances().condition_ceiling == 1e13);
+
+    std::cout << "  [PASS] TEST-FACT-25: tolerance reconciliation default 1e-12 verified\n";
+}
+
+void test_fact_26_norm_overflow_safety() {
+    // 1. Matrix entries whose sum causes norm infinity / norm 1 overflow
+    const Scalar huge = 1e308;
+    std::vector<Scalar> M_overflow = {
+        huge, huge,
+        huge, huge
+    };
+    auto env_of = make_test_basis_env(2, M_overflow);
+    BasisFactorization fact_of;
+    auto st_of = fact_of.factorize(*env_of.view);
+    assert(!st_of.is_ok());
+    assert(st_of.code() == StatusCode::NumericalFailure);
+    assert(!fact_of.is_factored());
+    assert(fact_of.state() == FactorizationState::Failed);
+
+    // 2. Normal matrix with non-finite rhs during solve
+    std::vector<Scalar> M_normal = {
+        2.0, 1.0,
+        1.0, 3.0
+    };
+    auto env_norm = make_test_basis_env(2, M_normal);
+    BasisFactorization fact_norm;
+    assert(fact_norm.factorize(*env_norm.view).is_ok());
+
+    auto sol = DenseVector::create(2, 42.0).value();
+    auto scr = DenseVector::create(2, 0.0).value();
+    auto bad_rhs = DenseVector::create(2, 1.0).value();
+    bad_rhs[0] = std::numeric_limits<Scalar>::infinity();
+
+    auto st_bad = fact_norm.solve(bad_rhs, sol, scr);
+    assert(!st_bad.is_ok());
+    assert(st_bad.code() == StatusCode::InvalidArgument);
+    assert(sol[0] == 42.0 && sol[1] == 42.0); // Preserved!
+
+    std::cout << "  [PASS] TEST-FACT-26: norm overflow and non-finite input safety\n";
+}
+
+void test_fact_27_residual_independence_basis_view() {
+    // Rectangular A (3x5) with basic column view
+    std::vector<Triplet> triplets = {
+        {0, 0, 1.0}, {0, 1, 3.0}, {0, 2, 0.5}, {0, 3, 2.0}, {0, 4, 1.0},
+        {1, 0, 2.0}, {1, 1, 1.0}, {1, 2, 1.5}, {1, 3, 5.0}, {1, 4, 2.0},
+        {2, 0, 0.5}, {2, 1, 4.0}, {2, 2, 2.0}, {2, 3, 1.0}, {2, 4, 6.0}
+    };
+    std::vector<Index> basic_vars = {1, 3, 4}; // Columns 1, 3, 4
+    auto env = make_rectangular_basis_env(3, 5, triplets, basic_vars);
+
+    BasisFactorization fact;
+    auto status = fact.factorize(*env.view);
+    assert(status.is_ok());
+
+    // Evaluate factorization residual - independently reads BasisMatrixView
+    auto fact_res = fact.compute_factorization_residual();
+    assert(fact_res.is_ok());
+    assert(fact_res.value() < 1e-12);
+
+    auto rhs = DenseVector::create(3, 0.0).value();
+    rhs[0] = 5.0; rhs[1] = 8.0; rhs[2] = 11.0;
+    auto sol = DenseVector::create(3, 0.0).value();
+    auto scr = DenseVector::create(3, 0.0).value();
+
+    // FTRAN solve
+    assert(fact.solve(rhs, sol, scr).is_ok());
+
+    // Independent check of B x - rhs directly querying env.view
+    for (Dimension i = 0; i < 3; ++i) {
+        Scalar b_x_i = 0.0;
+        for (Dimension j = 0; j < 3; ++j) {
+            b_x_i += env.view->get(i, j).value() * sol[j];
+        }
+        assert(std::abs(b_x_i - rhs[i]) < 1e-11);
+    }
+
+    // BTRAN solve
+    assert(fact.solve_transpose(rhs, sol, scr).is_ok());
+
+    // Independent check of B^T y - rhs directly querying env.view
+    for (Dimension j = 0; j < 3; ++j) {
+        Scalar b_t_y_j = 0.0;
+        for (Dimension i = 0; i < 3; ++i) {
+            b_t_y_j += env.view->get(i, j).value() * sol[i];
+        }
+        assert(std::abs(b_t_y_j - rhs[j]) < 1e-11);
+    }
+
+    std::cout << "  [PASS] TEST-FACT-27: independent residual verification against BasisMatrixView\n";
+}
+
+void test_fact_28_transpose_direct_multiplication() {
+    // Non-symmetric matrix requiring row swaps (P != I)
+    // Row 0 has smaller first entry than row 1
+    std::vector<Scalar> M = {
+        1.0, 7.0, 2.0,  // col 0
+        9.0, 2.0, 4.0,  // col 1
+        3.0, 1.0, 8.0   // col 2
+    };
+    auto env = make_test_basis_env(3, M);
+    BasisFactorization fact;
+    assert(fact.factorize(*env.view).is_ok());
+
+    // Confirm that row permutation occurred
+    const auto& pi_r = fact.row_permutation();
+    assert(pi_r[0] != 0 || pi_r[1] != 1 || pi_r[2] != 2);
+
+    auto rhs = DenseVector::create(3, 0.0).value();
+    rhs[0] = 3.5; rhs[1] = -1.2; rhs[2] = 4.8;
+
+    auto sol = DenseVector::create(3, 0.0).value();
+    auto scr = DenseVector::create(3, 0.0).value();
+
+    assert(fact.solve_transpose(rhs, sol, scr).is_ok());
+
+    // Direct B^T y calculation from authoritative BasisMatrixView:
+    // (B^T y)_j = sum_{i=0}^{m-1} B_{i, j} y_i
+    for (Dimension j = 0; j < 3; ++j) {
+        Scalar b_t_y_j = 0.0;
+        for (Dimension i = 0; i < 3; ++i) {
+            b_t_y_j += env.view->get(i, j).value() * sol[i];
+        }
+        const Scalar residual = std::abs(b_t_y_j - rhs[j]);
+        assert(residual < 1e-11);
+    }
+
+    std::cout << "  [PASS] TEST-FACT-28: transpose solve correct under row swaps (P != I)\n";
+}
+
+void test_fact_29_transactional_failure_preservation() {
+    std::vector<Scalar> M = {
+        3.0, 1.0,
+        1.0, 4.0
+    };
+    auto env = make_test_basis_env(2, M);
+    BasisFactorization fact;
+    assert(fact.factorize(*env.view).is_ok());
+
+    const Scalar canary = 98765.4321;
+    auto sol = DenseVector::create(2, canary).value();
+    auto scr = DenseVector::create(2, 0.0).value();
+
+    // 1. Solve failure with NaN rhs
+    auto nan_rhs = DenseVector::create(2, 1.0).value();
+    nan_rhs[0] = std::numeric_limits<Scalar>::quiet_NaN();
+    auto st = fact.solve(nan_rhs, sol, scr);
+    assert(!st.is_ok());
+    assert(sol[0] == canary && sol[1] == canary);
+
+    // 2. Transpose solve failure with Inf rhs
+    auto inf_rhs = DenseVector::create(2, 1.0).value();
+    inf_rhs[1] = std::numeric_limits<Scalar>::infinity();
+    st = fact.solve_transpose(inf_rhs, sol, scr);
+    assert(!st.is_ok());
+    assert(sol[0] == canary && sol[1] == canary);
+
+    // 3. Stale basis detection preserves destination
+    std::vector<Triplet> triplets_rect = {
+        Triplet{0, 0, 3.0}, Triplet{0, 1, 1.0}, Triplet{0, 2, 2.0},
+        Triplet{1, 0, 1.0}, Triplet{1, 1, 4.0}, Triplet{1, 2, 5.0}
+    };
+    std::vector<Index> basic_vars_rect = {0, 1};
+    auto env_stale = make_rectangular_basis_env(2, 3, triplets_rect, basic_vars_rect);
+    BasisFactorization fact_stale;
+    assert(fact_stale.factorize(*env_stale.view).is_ok());
+
+    assert(env_stale.basis.replace_basic_variable(2, 0).is_ok()); // Column 2 enters row 0
+    auto valid_rhs = DenseVector::create(2, 2.0).value();
+    st = fact_stale.solve(valid_rhs, sol, scr);
+    assert(!st.is_ok());
+    assert(st.code() == StatusCode::InconsistentModel);
+    assert(sol[0] == canary && sol[1] == canary);
+
+    st = fact_stale.solve_transpose(valid_rhs, sol, scr);
+    assert(!st.is_ok());
+    assert(st.code() == StatusCode::InconsistentModel);
+    assert(sol[0] == canary && sol[1] == canary);
+
+    // 4. Factorization failure resets state cleanly to Failed
+    std::vector<Scalar> M_sing = {
+        1.0, 2.0,
+        2.0, 4.0 // linearly dependent
+    };
+    auto env_sing = make_test_basis_env(2, M_sing);
+    BasisFactorization fact2;
+    assert(fact2.factorize(*env.view).is_ok()); // initially factored
+    assert(fact2.is_factored());
+    // Refactorize with singular matrix
+    auto sing_st = fact2.factorize(*env_sing.view);
+    assert(!sing_st.is_ok());
+    assert(sing_st.code() == StatusCode::NumericalFailure);
+    assert(!fact2.is_factored());
+    assert(fact2.state() == FactorizationState::Failed);
+
+    std::cout << "  [PASS] TEST-FACT-29: transactional failure preservation across all paths\n";
+}
+
+void test_fact_30_badly_scaled_nonsingular_basis() {
+    // Badly scaled matrix with disparate row/col magnitudes:
+    // Row 0: ~1e6, Row 1: ~1.0, Row 2: ~1e-6
+    std::vector<Scalar> M = {
+        1e6,  1e4,  2e4,
+        1.0,  5.0,  0.5,
+        1e-6, 2e-7, 1e-6
+    };
+    auto env = make_test_basis_env(3, M);
+    BasisFactorization fact;
+    auto status = fact.factorize(*env.view);
+    assert(status.is_ok());
+    assert(fact.is_factored());
+
+    // Condition estimate should be large, but diagnostic only (not fatal)
+    assert(fact.condition_estimate() > 1e6);
+
+    auto rhs = DenseVector::create(3, 0.0).value();
+    rhs[0] = 1e6; rhs[1] = 2.0; rhs[2] = 1e-6;
+
+    auto sol = DenseVector::create(3, 0.0).value();
+    auto scr = DenseVector::create(3, 0.0).value();
+
+    assert(fact.solve(rhs, sol, scr).is_ok());
+    assert(fact.solve_transpose(rhs, sol, scr).is_ok());
+
+    std::cout << "  [PASS] TEST-FACT-30: badly scaled nonsingular basis solve & diagnostic condition\n";
 }
 
 // ============================================================================
@@ -1052,6 +1301,12 @@ int main() {
     sih26119::test::test_fact_22_factorization_residual();
     sih26119::test::test_fact_23_deterministic_pivoting();
     sih26119::test::test_fact_24_independent_oracle_agreement();
+    sih26119::test::test_fact_25_tolerance_default();
+    sih26119::test::test_fact_26_norm_overflow_safety();
+    sih26119::test::test_fact_27_residual_independence_basis_view();
+    sih26119::test::test_fact_28_transpose_direct_multiplication();
+    sih26119::test::test_fact_29_transactional_failure_preservation();
+    sih26119::test::test_fact_30_badly_scaled_nonsingular_basis();
 
     sih26119::test::run_property_tests();
 
