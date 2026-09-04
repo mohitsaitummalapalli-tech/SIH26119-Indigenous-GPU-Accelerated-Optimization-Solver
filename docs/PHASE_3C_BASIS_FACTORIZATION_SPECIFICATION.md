@@ -1,10 +1,10 @@
 # Phase 3C: Basis Factorization Layer — Mathematical and Numerical Specification
 
-> **Authoritative Mathematical, Numerical, and Architectural Specification**  
-> **Repository:** SIH26119 — Indigenous GPU-Accelerated Optimization Solver  
-> **Status:** Phase 3C Specification Gate  
-> **Authoritative Baseline Commit:** `68e3d8553e8b749e4e08d00730bfd131188e8c3e`  
-> **Mandatory Scope Declaration:** *Phase 3C defines the numerical factorization and linear solve layer ($B x = r$ and $B^T y = r$) for the simplex basis matrix. It does NOT implement simplex pricing, pivots, ratio tests, Phase I, Phase II, primal simplex, dual simplex, GPU acceleration, or external solver interfaces.*
+> **Authoritative Mathematical, Numerical, and Architectural Specification**
+> **Repository:** SIH26119 — Indigenous GPU-Accelerated Optimization Solver
+> **Status:** Phase 3C Specification Gate
+> **Authoritative Baseline Commit:** `4caf928997c6086f56264295d815f982f2d0022e`
+> **Mandatory Scope Declaration:** *Phase 3C defines the numerical factorization and linear solve layer ($B x = r$ and $B^T y = r$) for the simplex basis matrix. It does NOT implement factorization code, simplex pricing, pivots, ratio tests, Phase I, Phase II, primal simplex, dual simplex, GPU acceleration, or external solver interfaces.*
 
 ---
 
@@ -27,7 +27,7 @@ The linear programming solver architecture enforces strict layered isolation acr
                                          v
 +===================================================================================+
 | Phase 3C: Basis Factorization Layer (SPECIFICATION ONLY)                          |
-| Solves B x = r (FTRAN) and B^T y = r (BTRAN) via P B Q = L U                      |
+| Solves B x = r (FTRAN) and B^T y = r (BTRAN) via P B = L U                        |
 | Singularity detection, condition estimation, zero-allocation solves               |
 +===================================================================================+
                                          |
@@ -39,13 +39,13 @@ The linear programming solver architecture enforces strict layered isolation acr
 ```
 
 ### 1.1 Source Grounding
-This specification builds strictly upon the existing committed Phase 1, Phase 2, Phase 3A, and Phase 3B contracts:
+This specification builds strictly upon existing committed Phase 1, Phase 2, Phase 3A, and Phase 3B contracts:
 - [`src/solver/lp/basis.hpp`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/src/solver/lp/basis.hpp): Authoritative structural basis state, $O(1)$ query tables, and monotonically increasing `version()`.
 - [`src/solver/lp/basis_matrix_view.hpp`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/src/solver/lp/basis_matrix_view.hpp): Non-owning logical view over $A \in \mathbb{R}^{m \times n}$ where column $k$ is $A_{:, B(k)}$.
 - [`src/numerics/sparse_matrix.hpp`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/src/numerics/sparse_matrix.hpp): Zero-allocation CSR SpMV and residual contracts (`multiply`, `residual`).
 - [`src/numerics/dense_vector.hpp`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/src/numerics/dense_vector.hpp): Zero-allocation dense vector layer with `is_finite_scalar` guarantees.
 - [`src/numerics/tolerances.hpp`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/src/numerics/tolerances.hpp): Authoritative `approx_equal` and `approx_zero` semantics.
-- [`src/core/status.hpp`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/src/core/status.hpp): Native error and result types (`StatusCode::InvalidArgument`, `StatusCode::InconsistentModel`, `StatusCode::InvalidBounds`).
+- [`src/core/status.hpp`](file:///c:/Users/mohit/OneDrive/Desktop/SIH26119%20%E2%80%94%20Indigenous%20GPU-Accelerated%20Optimization%20Solver/src/core/status.hpp): Native error and result types. Numerical failure conditions map to `StatusCode::NumericalFailure`.
 
 ---
 
@@ -60,7 +60,7 @@ Entry-wise:
 $$B_{i, k} = A_{i, B(k)}, \quad \forall i \in \{0, \dots, m-1\}, \; k \in \{0, \dots, m-1\}$$
 
 ### 2.2 Factorization Lifecycle States
-The factorization object must maintain an explicit, observable lifecycle state:
+The factorization object maintains an explicit, observable lifecycle state:
 
 ```
            +------------------+
@@ -89,62 +89,64 @@ The factorization object must maintain an explicit, observable lifecycle state:
   +--------------+         (triggers refactorization)
 ```
 
-1. **`Unfactorized`**: Initial state prior to any factorization attempt, or following an explicit reset.
-2. **`Factored`**: Factorization $P B Q = L U$ succeeded. `fact.basis_version == basis.version()`. Both forward solve ($B x = r$) and backward/dual solve ($B^T y = r$) are valid.
-3. **`NumericallySingular`**: Factorization detected that $\min_k |U_{k, k}| \le \varepsilon_{\text{sing}}$ or encountered non-finite arithmetic. Solves are rejected with `StatusCode::InconsistentModel`.
+1. **`Unfactorized`**: Initial state prior to factorization, or following an explicit reset.
+2. **`Factored`**: Factorization $P B = L U$ succeeded. `fact.basis_version == basis.version()`. Both forward solve ($B x = r$) and dual transpose solve ($B^T y = r$) are valid.
+3. **`NumericallySingular`**: Factorization detected that $\min_k |U_{k, k}| \le \varepsilon_{\text{sing}}$, encountered non-finite arithmetic, or suffered pivot breakdown. Solves are rejected with `StatusCode::NumericalFailure`.
 4. **`Invalid`**: Dimensions or internal invariants corrupted.
-5. **`Stale`**: The underlying `Basis` has pivoted (`basis.version() > fact.basis_version`). Any call to `solve()` or `solve_transpose()` is strictly rejected.
+5. **`Stale`**: The underlying `Basis` has pivoted (`basis.version() > fact.basis_version`). Any call to `solve()` or `solve_transpose()` is strictly rejected with `StatusCode::InconsistentModel`.
 
-### 2.3 Strict Version Invariant
+### 2.3 Strict Status Code Semantics
 > [!IMPORTANT]
-> **Mandatory Version Binding Invariant:**  
+> **Status Code Separation Rule:**
+> A structurally valid LP model whose basis is numerically singular or ill-conditioned is **NOT** a modeling defect.
+> - `StatusCode::NumericalFailure`: Exclusively reserved for numerically singular basis matrices, unacceptable pivots, factorization breakdown, and solve residual failures.
+> - `StatusCode::InconsistentModel` / `StatusCode::InvalidArgument`: Strictly reserved for structural dimension mismatches, stale basis versions, or illegal caller parameters.
+
+### 2.4 Strict Version Invariant
 > $$\text{factorization.basis\_version} \equiv \text{basis.version()}$$
-> A factorization created for basis version $v$ **MUST NOT and CANNOT** be silently executed for basis version $v+1$. Any attempt to solve with a stale factorization immediately fails with `StatusCode::InconsistentModel`.
+> A factorization created for basis version $v$ **MUST NOT and CANNOT** be silently executed for basis version $v+1$.
 
 ---
 
-## 3. Factorization Method Evaluation & Selection
+## 3. Factorization Method & Numerical Stability Strategy
 
-### 3.1 Candidate Architectures
+### 3.1 Initial Implementation Convention: Row-Only Partial Pivoting ($P B = L U$)
+For the initial Phase 3C implementation contract, the factorization is strictly:
 
-| Criteria | Dense LU with Partial Pivoting ($P B = L U$) | Sparse LU with Markowitz ($P B Q = L U$) | Product Form of Inverse (PFI) |
-| :--- | :--- | :--- | :--- |
-| **Numerical Stability** | Maximum: Guaranteed $\vert L_{ij} \vert \le 1.0$ via row partial pivoting | High: Guaranteed by threshold parameter $u \in [0.1, 1.0]$ | Degrades rapidly; requires periodic refactorization |
-| **Fill-in Control** | None ($O(m^2)$ storage always allocated) | Explicit: Markowitz count $\mu_{ij} = (r_i - 1)(c_j - 1)$ | Accumulates eta vectors linearly with pivots |
-| **Algorithmic Complexity** | $O(m^3)$ factorization, $O(m^2)$ solve | $O(m + \text{fill})$ solve; $O(\text{nnz} \cdot m)$ factorization | $O(m + k \cdot m)$ solve after $k$ pivots |
-| **Implementation Risk** | Low: Deterministic, no dynamic linked structures | Medium: Requires sparse matrix dynamic allocation / garbage collection | High if used without robust base factorization |
-| **Simplex Integration** | Ideal reference base for Phase 3C | Primary engine for large-scale industrial simplex | Simplex update mechanism, not a base factorization |
+$$P B = L U$$
 
-### 3.2 Chosen Method for Phase 3C
-**Primary Production Architecture for Phase 3C:**  
-**Threshold Partial Pivoting Sparse/Dense Unification ($P B Q = L U$)**:
-1. **Mathematical Structure:** Row permutations $P$ and column permutations $Q$ such that:
-   $$P B Q = L U$$
-   where $L$ is unit lower triangular ($L_{ii} = 1$) and $U$ is upper triangular.
-2. **Initial Phase 3C Engine:**
-   - For small to medium systems ($m \le 2000$), an explicit Dense Column-Major Block LU with Row Partial Pivoting ($Q = I$, $P B = L U$) provides an unconditional, zero-allocation, numerically bulletproof foundation.
-   - For sparse large systems, the exact same API and permutation algebra $P B Q = L U$ generalizes directly to Markowitz threshold pivoting without changing a single line of solver interface code.
-3. **Justification:**
-   - Industrial solvers (HiGHS, CPLEX, GLPK) all separate the base factorization contract from basis update routines. Establishing a robust, deterministic, zero-allocation $P B Q = L U$ solver in Phase 3C allows Phase 3D to implement simplex pricing and ratio tests with 100% numerical confidence.
+- **Row Permutation Only:** $Q = I$. Column permutations are not supported in the initial implementation. Future sparse column-permuted variants (e.g. Markowitz $P B Q = L U$) are documented as future extension points for Phase 3D.
+- **Unit Lower Triangular $L$:** $L_{ii} = 1.0$.
+- **Upper Triangular $U$:** $U_{ij} = 0$ for $i > j$.
+
+### 3.2 Removal of Overclaims: Realistic Numerical Stability
+"partial pivoting is the selected baseline numerical-stability strategy; it does not provide an unconditional error guarantee for every matrix."
+
+Phase 3C explicitly distinguishes:
+1. **Practical numerical robustness:** In optimization practice, pivot growth is almost always modest ($\rho_m \ll 10^3$) for typical basis matrices.
+2. **Backward-error verification:** Every solve undergoes an a posteriori normwise backward-residual test $\|B \hat{x} - \text{rhs}\|_\infty \le \tau_{\text{resid}} (\|B\|_\infty \|\hat{x}\|_\infty + \|\text{rhs}\|_\infty)$ to guarantee reliability rather than relying on an a priori assumption.
+3. **Worst-case pivot growth:** Theoretical pivot growth $\rho_m = \frac{\max_{i,j,k} |M_{i,j}^{(k)}|}{\max_{i,j} |B_{i,j}|}$ can grow as large as $2^{m-1}$ (e.g. Wilkinson matrices).
+4. **Formal stability guarantees:** Row partial pivoting formally guarantees that every subdiagonal element of $L$ satisfies $|L_{ij}| \le 1.0$ ($i > j$) as a direct consequence of largest-magnitude pivot selection in column $k$. It does not guarantee small backward error if exponential pivot growth occurs.
+
 
 ---
 
-## 4. Complete LU Mathematics & Solve Derivations
+## 4. Complete LU Mathematics & Solve Derivations ($P B = L U$)
 
 ### 4.1 Matrix Decomposition Structure
-The factorization computes permutation matrices $P, Q \in \mathbb{R}^{m \times m}$, a unit lower triangular matrix $L \in \mathbb{R}^{m \times m}$, and an upper triangular matrix $U \in \mathbb{R}^{m \times m}$ satisfying:
+The factorization computes a row permutation matrix $P \in \mathbb{R}^{m \times m}$, a unit lower triangular matrix $L \in \mathbb{R}^{m \times m}$, and an upper triangular matrix $U \in \mathbb{R}^{m \times m}$ such that:
 
-$$P B Q = L U$$
+$$P B = L U$$
 
-- $P$: Row permutation matrix ($P e_i = e_{\pi_r(i)}$ where $\pi_r$ is the row pivot index vector).
-- $Q$: Column permutation matrix ($Q e_j = e_{\pi_c(j)}$ where $\pi_c$ is the column pivot index vector). For row-only pivoting, $Q = I$ and $\pi_c(j) = j$.
+- $P$: Row permutation matrix ($P e_i = e_{\pi_r(i)}$ where $\pi_r(i)$ is the row swapped into pivot position $i$).
+- $P^{-1} = P^T$: Unpermutation matrix.
 - $L$: Unit lower triangular:
   $$L = \begin{bmatrix}
   1 & 0 & \cdots & 0 \\
   l_{1, 0} & 1 & \cdots & 0 \\
   \vdots & \vdots & \ddots & \vdots \\
   l_{m-1, 0} & l_{m-1, 1} & \cdots & 1
-  \end{bmatrix}, \quad |l_{i, j}| \le \frac{1}{u} \le 10.0$$
+  \end{bmatrix}, \quad |l_{i, j}| \le 1.0 \quad (\forall i > j)$$
 - $U$: Upper triangular:
   $$U = \begin{bmatrix}
   u_{0, 0} & u_{0, 1} & \cdots & u_{0, m-1} \\
@@ -155,146 +157,145 @@ $$P B Q = L U$$
 
 ---
 
-### 4.2 Derivation of Primal Solve: $B x = r$ (FTRAN)
+### 4.2 Derivation of Primal Solve: $B x = \text{rhs}$ (FTRAN)
 
-We wish to solve for $x \in \mathbb{R}^m$ given RHS $r \in \mathbb{R}^m$:
+We wish to solve for $x \in \mathbb{R}^{m}$ given RHS $\text{rhs} \in \mathbb{R}^m$:
 
-$$B x = r$$
+$$B x = \text{rhs}$$
 
-1. Multiply by row permutation $P$ and insert $Q Q^T = I$:
-   $$P B (Q Q^T) x = P r \implies (P B Q) (Q^T x) = P r$$
-2. Substitute $P B Q = L U$:
-   $$L U (Q^T x) = P r$$
-3. Let $z = P r \in \mathbb{R}^m$ (permute RHS by row permutation):
-   $$z_i = r_{\pi_r(i)}, \quad i \in \{0, \dots, m-1\}$$
-4. **Forward Substitution ($L w = z$):**
+1. Multiply by row permutation $P$:
+   $$P B x = P \text{rhs}$$
+2. Substitute $P B = L U$:
+   $$L U x = P \text{rhs}$$
+3. **Step 1: Permute RHS by Row Permutation $P$:**
+   $$z = P \text{rhs} \iff z_i = \text{rhs}_{\pi_r(i)}, \quad \forall i \in \{0, \dots, m-1\}$$
+4. **Step 2: Forward Substitution ($L w = z$):**
    Since $L$ is unit lower triangular ($L_{ii} = 1$):
    $$w_i = z_i - \sum_{j=0}^{i-1} L_{i, j} w_j, \quad i = 0, 1, \dots, m-1$$
-5. **Backward Substitution ($U v = w$):**
+5. **Step 3: Backward Substitution ($U x = w$):**
    Since $U$ is upper triangular:
-   $$v_i = \frac{w_i - \sum_{j=i+1}^{m-1} U_{i, j} v_j}{U_{i, i}}, \quad i = m-1, m-2, \dots, 0$$
-6. **Column Unpermutation ($x = Q v$):**
-   $$x_{\pi_c(i)} = v_i \iff x = Q v, \quad i = 0, 1, \dots, m-1$$
+   $$x_i = \frac{w_i - \sum_{j=i+1}^{m-1} U_{i, j} x_j}{U_{i, i}}, \quad i = m-1, m-2, \dots, 0$$
+   Here $x$ is the final primal solution.
 
 ---
 
-### 4.3 Derivation of Dual / Transpose Solve: $B^T y = r$ (BTRAN)
+### 4.3 Derivation of Dual / Transpose Solve: $B^T y = \text{rhs}$ (BTRAN)
 
-We wish to solve for $y \in \mathbb{R}^m$ given dual RHS $r \in \mathbb{R}^m$:
+We wish to solve for $y \in \mathbb{R}^m$ given dual RHS $\text{rhs} \in \mathbb{R}^m$:
 
-$$B^T y = r$$
+$$B^T y = \text{rhs}$$
 
-1. Transpose the factorization equation $P B Q = L U$:
-   $$(P B Q)^T = (L U)^T \implies Q^T B^T P^T = U^T L^T$$
-2. Isolate $B^T$:
-   $$B^T = Q U^T L^T P$$
-3. Substitute into $B^T y = r$:
-   $$Q U^T L^T P y = r$$
-4. Multiply both sides by $Q^T$ (since $Q^T Q = I$):
-   $$U^T L^T (P y) = Q^T r$$
-5. Let $z = Q^T r \in \mathbb{R}^m$ (permute RHS by column permutation):
-   $$z_i = r_{\pi_c(i)}, \quad i \in \{0, \dots, m-1\}$$
-6. **Forward Substitution on Transpose ($U^T w = z$):**
-   $U^T$ is lower triangular with non-unit diagonal $U_{ii}$:
-   $$w_i = \frac{z_i - \sum_{j=0}^{i-1} U_{j, i} w_j}{U_{i, i}}, \quad i = 0, 1, \dots, m-1$$
-7. **Backward Substitution on Transpose ($L^T v = w$):**
-   $L^T$ is unit upper triangular ($L_{ii} = 1$):
+1. Transpose the factorization equation $P B = L U$:
+   $$(P B)^T = (L U)^T \implies B^T P^T = U^T L^T$$
+2. Multiply on the right by $P$ (since $P^T P = I$):
+   $$B^T = U^T L^T P$$
+3. Substitute $B^T$ into the equation $B^T y = \text{rhs}$:
+   $$U^T L^T P y = \text{rhs}$$
+4. **Step 1: Forward Substitution on Lower Triangular $U^T$ ($U^T w = \text{rhs}$):**
+   $U^T$ is lower triangular with diagonal entries $U_{ii}$.
+   $$w_i = \frac{\text{rhs}_i - \sum_{j=0}^{i-1} U_{j, i} w_j}{U_{i, i}}, \quad i = 0, 1, \dots, m-1$$
+5. **Step 2: Backward Substitution on Unit Upper Triangular $L^T$ ($L^T v = w$):**
+   $L^T$ is unit upper triangular ($L_{ii} = 1$).
    $$v_i = w_i - \sum_{j=i+1}^{m-1} L_{j, i} v_j, \quad i = m-1, m-2, \dots, 0$$
-8. **Row Unpermutation ($y = P^T v$):**
-   Since $v = P y \implies y = P^T v$:
-   $$y_{\pi_r(i)} = v_i \iff y = P^T v, \quad i = 0, 1, \dots, m-1$$
+6. **Step 3: Row Unpermutation via $P^T$ ($y = P^T v$):**
+   We have $P y = v$. Multiplying by $P^T$ gives:
+   $$y = P^T v \iff y_{\pi_r(i)} = v_i, \quad \forall i \in \{0, \dots, m-1\}$$
+   Explicitly in vector indexing:
+   $$y[\pi_r(i)] = v[i], \quad \forall i \in \{0, \dots, m-1\}$$
 
 > [!IMPORTANT]
-> **Summary of Transpose Permutation Sequencing:**  
-> - FTRAN: $r \xrightarrow{P} z \xrightarrow{L^{-1}} w \xrightarrow{U^{-1}} v \xrightarrow{Q} x$  
-> - BTRAN: $r \xrightarrow{Q^T} z \xrightarrow{U^{-T}} w \xrightarrow{L^{-T}} v \xrightarrow{P^T} y$  
-> Notice that the operations and permutations reverse in exact algebraic duality.
+> **Summary of Transpose Sequencing ($P B = L U$):**
+> - FTRAN ($B x = \text{rhs}$): $\text{rhs} \xrightarrow{P} z \xrightarrow{L^{-1}} w \xrightarrow{U^{-1}} x$
+> - BTRAN ($B^T y = \text{rhs}$): $\text{rhs} \xrightarrow{U^{-T}} w \xrightarrow{L^{-T}} v \xrightarrow{P^T} y$
+> The final unpermutation step in BTRAN is $y = P^T v$.
 
 ---
 
 ## 5. Pivoting Policy & Deterministic Tie-Breaking
 
-### 5.1 Threshold Partial Pivoting (TPP)
-At elimination step $k \in \{0, \dots, m-1\}$ on working submatrix $M^{(k)}$:
-1. Candidate search in active column $k$:
-   $$c_{\max} = \max_{i \ge k} |M_{i, k}^{(k)}|$$
-2. If $c_{\max} \le \varepsilon_{\text{sing}}$ or $\text{isnan}(c_{\max})$:
-   The submatrix has numerical rank deficiency. Factorization halts immediately and reports `StatusCode::InconsistentModel`.
-3. **Threshold Acceptance Criterion:**
-   A candidate row $p \ge k$ is acceptable if:
-   $$|M_{p, k}^{(k)}| \ge u \cdot c_{\max}$$
-   where $u \in (0.0, 1.0]$ is the Markowitz/TPP threshold parameter.
-   - **Default:** $u = 0.1$ for sparse Markowitz, $u = 1.0$ for dense partial pivoting (standard Gaussian elimination).
-4. **Deterministic Tie-Breaking Rule:**
-   If multiple candidate rows satisfy $|M_{p, k}^{(k)}| \ge u \cdot c_{\max}$:
+### 5.1 Standard Row Partial Pivoting
+At elimination step $k \in \{0, \dots, m-1\}$ on active working submatrix $M^{(k)}$:
+1. Search for maximum column magnitude:
+   $$p = \operatorname{argmax}_{i \ge k} |M_{i, k}^{(k)}|$$
+2. **Deterministic Tie-Breaking:**
+   If multiple candidate rows achieve the exact maximum magnitude:
    $$p^* = \min \left\{ p \in \{k, \dots, m-1\} : |M_{p, k}^{(k)}| = \max_{i \ge k} |M_{i, k}^{(k)}| \right\}$$
-   Ties on identical magnitude are broken strictly by **smallest row index $p$**. This ensures bit-level determinism across platforms.
+   Ties are broken strictly by **smallest row index $p$**.
 
-### 5.2 Singularity Criteria vs. Condition Estimation vs. Residual Check
-The specification enforces three distinct numerical metrics that must never be conflated:
-
-| Diagnostic Metric | Mathematical Definition | Role / Decision Boundary | Action upon Violation |
-| :--- | :--- | :--- | :--- |
-| **Pivot Singularity ($\varepsilon_{\text{sing}}$)** | $\min_k |U_{k, k}| \le \varepsilon_{\text{sing}}$ (Default: $10^{-12}$) | Local pivot acceptance during LU elimination | Immediate factorization abort; return `InconsistentModel` |
-| **Condition Estimate ($\kappa^*(B)$)** | $\kappa^*(B) = \|B\|_\infty \|B^{-1}\|_\infty \approx \|B\|_\infty \frac{\|w\|_\infty}{\|z\|_\infty}$ (via Hager-Higham 1-norm estimator) | Global conditioning diagnostic (Ceiling: $10^{13}$) | Flag ill-conditioning; schedule basis refactorization / pivot reject |
-| **Solve Residual ($\tau_{\text{resid}}$)** | $\frac{\|B x - r\|_\infty}{\|B\|_\infty \|x\|_\infty + \|r\|_\infty} \le \tau_{\text{resid}}$ (Default: $10^{-8}$) | A posteriori backward error verification on every solve | Return error; trigger refactorization |
-
----
-
-## 6. Numerical Stability & Error Bounds
-
-### 6.1 Pivot Growth Factor
-During elimination, the growth factor $\rho_m$ is monitored:
-
-$$\rho_m = \frac{\max_{i, j, k} |M_{i, j}^{(k)}|}{\max_{i, j} |B_{i, j}|}$$
-
-If $\rho_m > 10^{12}$, severe roundoff accumulation is occurring; the factorization is marked unstable.
-
-### 6.2 Backward Error Bounds for Solves
-For computed solution $\hat{x}$, the componentwise backward error $\omega$ is:
-
-$$\omega = \max_i \frac{|(B \hat{x} - r)_i|}{(|B| |\hat{x}| + |r|)_i}$$
-
-A solve is accepted as numerically sound if:
-
-$$\|B \hat{x} - r\|_\infty \le \tau_{\text{resid}} \left( \|B\|_\infty \|\hat{x}\|_\infty + \|r\|_\infty \right)$$
-
-where $\tau_{\text{resid}} = 10^{-8}$ by default (configurable in `FactorizationTolerances`).
+### 5.2 Pivot Acceptance Policy
+The pivot candidate magnitude $|M_{p^*, k}^{(k)}|$ is evaluated against separate criteria:
+1. **Non-Finite Pivot:** If $\text{isnan}(M_{p^*, k}^{(k)})$ or $\text{isinf}(M_{p^*, k}^{(k)})$, abort immediately and return `StatusCode::NumericalFailure`.
+2. **Zero / Sub-Threshold Pivot:** If $|M_{p^*, k}^{(k)}| \le \varepsilon_{\text{sing}}$ (where $\varepsilon_{\text{sing}} = 10^{-12}$ by default):
+   The matrix is numerically rank-deficient. Abort factorization and return `StatusCode::NumericalFailure`.
+3. **Multiplier Magnitude Guarantee:**
+   Because row $p^*$ is swapped with row $k$, the multiplier eliminated in row $i > k$ is:
+   $$L_{i, k} = \frac{M_{i, k}^{(k)}}{M_{p^*, k}^{(k)}}$$
+   Since $|M_{p^*, k}^{(k)}| \ge |M_{i, k}^{(k)}|$ for all $i \ge k$, this guarantees $|L_{i, k}| \le 1.0$.
 
 ---
 
-## 7. Scaling Strategy
+## 6. Condition Number Estimate as a Diagnostic Signal
 
-### 7.1 Mathematical Transformation
-To minimize condition numbers and equalize row magnitudes prior to factorization, row scaling $D_r$ and column scaling $D_c$ may optionally be applied:
+### 6.1 Role of Condition Number
+- The condition number estimate $\kappa^*(B) = \|B\|_1 \|B^{-1}\|_1$ (computed via the Hager-Higham 1-norm algorithm) is an **operational diagnostic metric**.
+- **Crucial Policy Rule:** The solver **MUST NOT** reject a solve or declare a solve invalid based on $\kappa^*(B) > 10^{13}$ alone.
+- Ill-conditioned triangular or diagonal systems can often be solved with acceptable backward residual.
+- **Operational Trigger:** A high condition number estimate ($\kappa^*(B) > 10^{13}$) acts as a signal to:
+  1. Emit an internal numerical warning.
+  2. Schedule basis refactorization or basis repair in Phase 3D.
+  3. Declare `StatusCode::NumericalFailure` **ONLY** if combined with solve residual failure.
 
-$$\tilde{B} = D_r B D_c$$
+---
 
-where $D_r = \operatorname{diag}(d_{r, 0}, \dots, d_{r, m-1})$ and $D_c = \operatorname{diag}(d_{c, 0}, \dots, d_{c, m-1})$ are positive diagonal matrices.
+## 7. Solve and Factorization Residual Criteria
 
-### 7.2 Phase 3C Policy
+### 7.1 Normwise Backward-Residual Criterion for Solves
+For computed primal solution $\hat{x}$ ($B \hat{x} \approx \text{rhs}$), success is declared if and only if:
+
+$$\|B \hat{x} - \text{rhs}\|_\infty \le \tau_{\text{resid}} \left( \|B\|_\infty \|\hat{x}\|_\infty + \|\text{rhs}\|_\infty \right)$$
+
+For computed dual solution $\hat{y}$ ($B^T \hat{y} \approx \text{rhs}$), success is declared if and only if:
+
+$$\|B^T \hat{y} - \text{rhs}\|_\infty \le \tau_{\text{resid}} \left( \|B\|_\infty \|\hat{y}\|_\infty + \|\text{rhs}\|_\infty \right)$$
+
+- **Default Tolerance:** $\tau_{\text{resid}} = 10^{-8}$.
+- **Zero-Denominator Handling:** If $(\|B\|_\infty \|\hat{x}\|_\infty + \|\text{rhs}\|_\infty) == 0.0$, the residual test requires:
+  $$\|B \hat{x} - \text{rhs}\|_\infty == 0.0$$
+- If the backward residual exceeds the threshold, the solve returns `StatusCode::NumericalFailure`.
+
+### 7.2 Scale-Aware Factorization Check
+During diagnostic audits or testing, the factorization residual $\|P B - L U\|_\infty$ is validated using a scale-aware criterion:
+
+$$\|P B - L U\|_\infty \le \tau_{\text{fact}} \left( \|P B\|_\infty + \|L U\|_\infty \right)$$
+
+- **Default Tolerance:** $\tau_{\text{fact}} = 10^{-12}$.
+- **Zero-Denominator Handling:** If $(\|P B\|_\infty + \|L U\|_\infty) == 0.0$, the test requires:
+  $$\|P B - L U\|_\infty == 0.0$$
+- Exact floating-point equality ($P B == L U$) is never expected or asserted.
+
+---
+
+## 8. Scaling Strategy
+
 - **Phase 3C Default:** **Unscaled Factorization ($D_r = I, D_c = I$)**.
-  The standardized matrix $A$ from Phase 3A is already normalized in RHS sign. Avoiding intermediate scaling in Phase 3C ensures that verification residuals directly match the canonical matrix without compounding scaling roundoff.
-- **Undoing Scaling in Solves (Architecture Ready):**
-  - Primal: $B x = r \iff (D_r B D_c) (D_c^{-1} x) = D_r r \implies \tilde{B} \tilde{x} = D_r r$, then $x = D_c \tilde{x}$.
-  - Dual: $B^T y = r \iff (D_c B^T D_r) (D_r^{-1} y) = D_c r \implies \tilde{B}^T \tilde{y} = D_c r$, then $y = D_r \tilde{y}$.
+  Standardized matrices from Phase 3A already normalize RHS signs. Eliminating artificial scaling avoids introducing scaling roundoff into the initial baseline.
+- **Extension Point:** If row scaling $D_r$ is enabled in future iterations:
+  - $(D_r B) x = D_r \text{rhs} \implies \tilde{B} x = \tilde{\text{rhs}}$
+  - $(B^T D_r) (D_r^{-1} y) = \text{rhs} \implies \tilde{B}^T \tilde{y} = \text{rhs}$, then $y = D_r \tilde{y}$.
 
 ---
 
-## 8. Storage Model & Zero-Allocation Memory Layout
+## 9. Storage Model & Zero-Allocation Solve Contracts
 
-### 8.1 Memory Structures
-All storage is preallocated during initialization or resized only when basis dimension $m$ changes. Inside the simplex loop, **zero heap allocations are executed**.
+### 9.1 Storage Structure
 
 ```cpp
 struct FactorizationStorage {
     Dimension m{0};                       ///< Basis dimension m x m
-    std::vector<Scalar> lu_data;         ///< Dense m x m column-major (or sparse CSR L and U)
+    std::vector<Scalar> lu_data;         ///< Dense m x m column-major storage
     std::vector<Index> row_perm;         ///< pi_r: length m (row permutation P)
-    std::vector<Index> row_perm_inv;     ///< pi_r_inv: length m (P^T)
-    std::vector<Index> col_perm;         ///< pi_c: length m (column permutation Q)
-    std::vector<Index> col_perm_inv;     ///< pi_c_inv: length m (Q^T)
-    
+    std::vector<Index> row_perm_inv;     ///< pi_r_inv: length m (P^T mapping)
+
     // Diagnostic metrics
     Scalar max_growth{1.0};
     Scalar condition_estimate{1.0};
@@ -303,26 +304,16 @@ struct FactorizationStorage {
 };
 ```
 
-### 8.2 Memory Bounds
-- For dense storage: Exactly $m^2$ `Scalar` entries ($\approx 8 \times m^2$ bytes) + $4m$ `Index` entries.
-- For $m = 1000$: $8 \times 10^6 \text{ bytes} \approx 8 \text{ MB}$.
-- For $m = 2000$: $32 \text{ MB}$.
-
----
-
-## 9. Solve API & Workspace Contracts
-
-### 9.1 C++ Interface Specification
+### 9.2 Zero-Allocation Solve API
 
 ```cpp
 namespace sih26119 {
 
 struct FactorizationTolerances {
     Scalar singularity_tol{1e-12};   ///< Min acceptable diagonal pivot |U_kk|
-    Scalar residual_tol{1e-8};       ///< Relative solve residual ceiling
+    Scalar residual_tol{1e-8};       ///< Relative solve backward error ceiling
     Scalar max_growth_tol{1e12};     ///< Maximum permissible pivot growth
-    Scalar condition_ceiling{1e13};  ///< Ill-conditioning alarm ceiling
-    Scalar tpp_threshold{1.0};       ///< Threshold partial pivoting parameter u in (0, 1]
+    Scalar condition_ceiling{1e13};  ///< Operational ill-conditioning signal
 };
 
 class BasisFactorization {
@@ -330,13 +321,11 @@ public:
     BasisFactorization() = default;
 
     /**
-     * @brief Performs full LU factorization of the basis matrix view:
+     * @brief Performs row partial pivoting LU factorization: P B = L U
      *
-     *     P B Q = L U
-     *
-     * @param basis_view Non-owning view over the standard constraint matrix A and Basis.
+     * @param basis_view Non-owning view over SparseMatrix A and Basis.
      * @param tols Configurable numerical tolerances.
-     * @return Status::ok() on success, or error status upon numerical singularity / failure.
+     * @return Status::ok() on success, or StatusCode::NumericalFailure upon breakdown.
      */
     [[nodiscard]] Status factorize(
         const BasisMatrixView& basis_view,
@@ -369,7 +358,6 @@ public:
         DenseVector& solution,
         DenseVector& scratch) const noexcept;
 
-    /// Observable state queries (O(1), zero allocation, noexcept)
     [[nodiscard]] bool is_factored() const noexcept;
     [[nodiscard]] uint64_t basis_version() const noexcept;
     [[nodiscard]] Dimension dimension() const noexcept;
@@ -380,45 +368,24 @@ public:
 } // namespace sih26119
 ```
 
-### 9.2 Strict Aliasing & Workspace Requirements
-Adhering to Phase 2 and Phase 3B contracts:
-1. `&rhs != &solution && (rhs.size() == 0 || rhs.data() != solution.data())`.
-2. `&rhs != &scratch && (rhs.size() == 0 || rhs.data() != scratch.data())`.
-3. `&solution != &scratch && (solution.size() == 0 || solution.data() != scratch.data())`.
-4. `scratch.size() >= m`.
-5. On failure, `solution` remains strictly unmodified (transactional guarantee).
+---
+
+## 10. Independent Numerical Oracle Architecture
+
+### 10.1 Primary Oracle: Gaussian Elimination with Complete Pivoting
+The reference oracle for Phase 3C tests will be an independently authored struct [`CompletePivotingOracle`]:
+1. **Independent Implementation:** Does NOT call `BasisFactorization` and does NOT use the same pivot selection code.
+2. **Complete Pivoting:** At each step $k$, searches the entire $(m-k) \times (m-k)$ active submatrix for the global maximum:
+   $$(p, q) = \operatorname{argmax}_{i \ge k, j \ge k} |M_{i, j}^{(k)}|$$
+3. **Capabilities:** Solves both $B x = \text{rhs}$ and $B^T y = \text{rhs}$ independently.
+4. **Independent Verification:** Computes backward residuals independently using full 80-bit or independent double calculations.
+5. **Cramer's Rule:** Used strictly as an auxiliary analytical sanity check for $m \le 2$.
 
 ---
 
-## 10. Refactorization Triggers & Basis Update Roadmap
+## 11. Concrete Test Matrix (24 Test Fixtures)
 
-### 10.1 Refactorization Triggers
-A full refactorization is mandatorily triggered when:
-1. `basis.version() != fact.basis_version` (basis was modified).
-2. Number of cumulative rank-1 updates exceeds $K_{\text{refactor}}$ (e.g. $K_{\text{refactor}} = 50$).
-3. Relative solve residual exceeds $\tau_{\text{resid}}$ ($\|B x - r\|_\infty > \tau_{\text{resid}}(\|B\| \|x\| + \|r\|)$).
-4. Condition number estimate $\kappa^*(B) > 10^{13}$.
-5. Explicit solver request.
-
-### 10.2 Phase 3C Policy vs. Phase 3D Update Roadmap
-- **Phase 3C:** **Full Refactorization on Every Basis Change**.
-  In Phase 3C, any pivot on `Basis` increments `version()`, requiring a clean, full call to `factorize()`. This establishes the baseline oracle of exact factorization accuracy.
-- **Phase 3D Roadmap:**
-  Phase 3D will introduce rank-1 basis update algorithms (Forrest-Tomlin or Product Form of Inverse $B_k = B_0 E_1 E_2 \cdots E_k$), comparing them against Phase 3C's full refactorization baseline.
-
----
-
-## 11. Independent Verification & Testing Strategy
-
-### 11.1 Independent Factorization Oracle
-An independent oracle [`GaussianEliminationOracle`] will be authored in `tests/unit/test_basis_factorization.cpp`:
-- Operates independently from `BasisFactorization`.
-- Uses naive Cramer's rule for $m \le 3$, and independent textbook Gaussian elimination with full pivoting and double-precision residual checking for $m > 3$.
-- Compares solutions of $B x = r$ and $B^T y = r$ bit-for-bit or within machine epsilon $\epsilon_{\text{mach}} \approx 2.22 \times 10^{-16}$.
-
-### 11.2 Comprehensive Test Matrix (24 Required Test Cases)
-
-| Test ID | Test Category | Mathematical Contract Verified |
+| Test ID | Test Category | Mathematical Invariant Verified |
 | :--- | :--- | :--- |
 | `TEST-FACT-01` | Degenerate $0 \times 0$ | $m=0$ basis: trivially factored, solve on empty vector succeeds |
 | `TEST-FACT-02` | Scalar $1 \times 1$ | $B = [5.0]$, solves $5x = 10 \implies x=2$, $5y = 15 \implies y=3$ |
@@ -426,57 +393,33 @@ An independent oracle [`GaussianEliminationOracle`] will be authored in `tests/u
 | `TEST-FACT-04` | Upper Triangular | $B = U$, $L=I$, backward substitution exact match |
 | `TEST-FACT-05` | Lower Triangular | $B = L$, $U=I$, forward substitution exact match |
 | `TEST-FACT-06` | Permutation Matrix | $B = P$, $L=I, U=I$, pure index shuffle on FTRAN and BTRAN |
-| `TEST-FACT-07` | Dense Nonsingular $3 \times 3$ | Random well-conditioned $3 \times 3$, verified against independent oracle |
-| `TEST-FACT-08` | Dense Nonsingular $5 \times 5$ | Random well-conditioned $5 \times 5$, verified against independent oracle |
-| `TEST-FACT-09` | Sparse Nonsingular $10 \times 10$ | Tridiagonal / banded matrix, verifies zero-allocation solve |
+| `TEST-FACT-07` | Dense Nonsingular $3 \times 3$ | Random well-conditioned $3 \times 3$, verified against complete pivoting oracle |
+| `TEST-FACT-08` | Dense Nonsingular $5 \times 5$ | Random well-conditioned $5 \times 5$, verified against complete pivoting oracle |
+| `TEST-FACT-09` | Sparse Banded $10 \times 10$ | Tridiagonal / banded matrix, verifies zero-allocation solve |
 | `TEST-FACT-10` | Negative Pivots | System requiring negative pivots, verifies sign preservation |
 | `TEST-FACT-11` | Mixed-Sign Entries | Matrix with large positive and negative numbers |
-| `TEST-FACT-12` | Exact Singular (Zero Row) | Row of zeros $\implies$ detected at step $k$, returns `InconsistentModel` |
-| `TEST-FACT-13` | Exact Singular (Col Dep) | Linearly dependent columns $\implies$ detected, returns `InconsistentModel` |
-| `TEST-FACT-14` | Numerically Singular | Pivot $|U_{kk}| = 10^{-13} < \varepsilon_{\text{sing}}$, rejected as singular |
-| `TEST-FACT-15` | Nearly Singular / Ill-Cond | Condition number $\approx 10^{14}$, condition warning triggered |
-| `TEST-FACT-16` | Badly Scaled Matrix | Entries ranging from $10^{-6}$ to $10^{6}$, verifies stability |
+| `TEST-FACT-12` | Exact Singular (Zero Row) | Row of zeros $\implies$ returns `StatusCode::NumericalFailure` |
+| `TEST-FACT-13` | Exact Singular (Col Dep) | Linearly dependent columns $\implies$ returns `StatusCode::NumericalFailure` |
+| `TEST-FACT-14` | Numerically Singular | Pivot $|U_{kk}| \le \varepsilon_{\text{sing}}$, returns `StatusCode::NumericalFailure` |
+| `TEST-FACT-15` | Ill-Conditioned Matrix | High condition number, verifies solve succeeds if residual passes |
+| `TEST-FACT-16` | Badly Scaled Matrix | Entries ranging from $10^{-6}$ to $10^{6}$, verifies backward residual test |
 | `TEST-FACT-17` | Multiple RHS Solves | Successive solves with distinct RHS vectors using same factorization |
-| `TEST-FACT-18` | Transpose Duality ($B^T y = r$)| Verifies that $y^T (B x) == x^T (B^T y)$ within machine tolerance |
-| `TEST-FACT-19` | NaN / Inf Input Rejection | Rejects non-finite entries in RHS or matrix with `InvalidArgument` |
+| `TEST-FACT-18` | Transpose Duality | Verifies that $y^T (B x) == x^T (B^T y)$ within machine tolerance |
+| `TEST-FACT-19` | NaN / Inf Input Rejection | Rejects non-finite entries in RHS with `StatusCode::InvalidArgument` |
 | `TEST-FACT-20` | Workspace Aliasing | Rejects `&solution == &rhs` or `&scratch == &solution` |
-| `TEST-FACT-21` | Workspace Size Violation | Rejects `scratch.size() < m` |
+| `TEST-FACT-21` | Workspace Size Violation | Rejects `scratch.size() < m` with `StatusCode::InvalidArgument` |
 | `TEST-FACT-22` | Stale Version Invalidation | Pivot on `Basis` increments version; subsequent `solve()` rejected |
 | `TEST-FACT-23` | Transactional Rollback | Failed solve leaves destination `solution` unchanged |
-| `TEST-FACT-24` | Residual Verification Metric | Computes $\|B x - r\|_\infty$ and asserts $\le \tau_{\text{resid}} (\|B\| \|x\| + \|r\|)$ |
-
-### 11.3 Deterministic Property Testing (`TEST-FACT-PROP-01`)
-- PRNG seeded with fixed deterministic seed `0x3C3C3C`.
-- Generates 50 random nonsingular matrices of dimensions $m \in [3, 20]$ with condition numbers $\kappa(B) \le 10^6$.
-- Solves both $B x = r$ and $B^T y = r$ for randomized RHS vectors.
-- Verifies:
-  1. $\|B x - r\|_\infty \le 10^{-8} (\|B\|_\infty \|x\|_\infty + \|r\|_\infty)$
-  2. $\|B^T y - r\|_\infty \le 10^{-8} (\|B\|_\infty \|y\|_\infty + \|r\|_\infty)$
-  3. Solutions match the independent Gaussian elimination oracle within $10^{-9}$.
+| `TEST-FACT-24` | Scale-Aware Factorization Check| Verifies $\|P B - L U\|_\infty \le \tau_{\text{fact}} (\|P B\|_\infty + \|L U\|_\infty)$ |
 
 ---
 
-## 12. Performance Measurement Protocols (Non-Claimative)
+## 12. Strict Non-Goals
 
-Phase 3C defines instrumentation metrics for benchmarking without making unsubstantiated performance claims:
-1. **Factorization Wall Time ($\mu s$):** Time to compute $P B Q = L U$.
-2. **Solve Wall Time ($\mu s$):** Time to compute FTRAN ($B x = r$).
-3. **Transpose Solve Wall Time ($\mu s$):** Time to compute BTRAN ($B^T y = r$).
-4. **Fill Ratio:** $\frac{\operatorname{nnz}(L) + \operatorname{nnz}(U) - m}{\operatorname{nnz}(B)}$.
-5. **Peak Working Memory (bytes):** Bytes allocated during initialization.
-6. **Dynamic Heap Allocations per Solve:** Must be strictly **0**.
-
----
-
-## 13. Acceptance Gate Checklist
-
-Prior to authorizing Phase 3C implementation:
-- [x] $P B Q = L U$ mathematical sign, diagonal, and permutation conventions explicitly specified.
-- [x] Complete algebraic derivation of forward solve ($B x = r$) and backward dual solve ($B^T y = r$) documented.
-- [x] Transpose solve permutation sequencing strictly derived and verified.
-- [x] Deterministic tie-breaking rules for partial pivoting defined.
-- [x] Clear mathematical distinction between pivot singularity threshold, condition number estimate, and solve residual.
-- [x] Preallocated storage model and zero-allocation solve workspace contract specified.
-- [x] Invariant binding `fact.basis_version == basis.version()` enforced.
-- [x] Independent oracle and 24-case test matrix specified.
-- [x] NO solver code, simplex code, pricing, ratio test, or GPU code added.
+Phase 3C strictly excludes:
+- Simplex pricing or reduced cost calculations
+- Simplex ratio tests
+- Primal or dual simplex iteration loops
+- Phase I or Phase II optimization procedures
+- GPU acceleration or CUDA kernels
+- Third-party solver wrappers
