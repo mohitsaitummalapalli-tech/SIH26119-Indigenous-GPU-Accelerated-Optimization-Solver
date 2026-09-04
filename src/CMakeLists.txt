@@ -7,6 +7,7 @@ add_library(sih26119_solver STATIC
     numerics/dense_vector.cpp
     numerics/dense_matrix.cpp
     numerics/sparse_matrix.cpp
+    solver/lp/lp_standard_form.cpp
 )
 
 target_include_directories(sih26119_solver PUBLIC

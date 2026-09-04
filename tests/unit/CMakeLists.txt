@@ -47,3 +47,8 @@ add_test(NAME SparseMatrixTest COMMAND test_sparse_matrix)
 add_executable(test_numerics test_numerics.cpp)
 target_link_libraries(test_numerics PRIVATE sih26119_solver)
 add_test(NAME NumericsTest COMMAND test_numerics)
+
+# Phase 3A: LP Standardization Layer
+add_executable(test_lp_standardization test_lp_standardization.cpp)
+target_link_libraries(test_lp_standardization PRIVATE sih26119_solver)
+add_test(NAME LpStandardizationTest COMMAND test_lp_standardization)
