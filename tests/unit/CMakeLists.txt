@@ -27,3 +27,23 @@ add_test(NAME LpParserTest COMMAND test_lp_parser)
 add_executable(test_serialization test_serialization.cpp)
 target_link_libraries(test_serialization PRIVATE sih26119_solver)
 add_test(NAME SerializationTest COMMAND test_serialization)
+
+# Phase 2: Dense Vector Numerical Abstraction
+add_executable(test_dense_vector test_dense_vector.cpp)
+target_link_libraries(test_dense_vector PRIVATE sih26119_solver)
+add_test(NAME DenseVectorTest COMMAND test_dense_vector)
+
+# Phase 2: Dense Matrix (Column-Major) Numerical Layer
+add_executable(test_dense_matrix test_dense_matrix.cpp)
+target_link_libraries(test_dense_matrix PRIVATE sih26119_solver)
+add_test(NAME DenseMatrixTest COMMAND test_dense_matrix)
+
+# Phase 2: Sparse Matrix (CSR) & SpMV Foundation
+add_executable(test_sparse_matrix test_sparse_matrix.cpp)
+target_link_libraries(test_sparse_matrix PRIVATE sih26119_solver)
+add_test(NAME SparseMatrixTest COMMAND test_sparse_matrix)
+
+# Phase 2: Numerics Stability, Tolerances & Deterministic Property Tests
+add_executable(test_numerics test_numerics.cpp)
+target_link_libraries(test_numerics PRIVATE sih26119_solver)
+add_test(NAME NumericsTest COMMAND test_numerics)
