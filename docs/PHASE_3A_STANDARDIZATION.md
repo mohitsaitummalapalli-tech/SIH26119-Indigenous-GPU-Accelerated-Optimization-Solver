@@ -193,25 +193,37 @@ Algorithm ReconstructPrimal(x_bar):
 ```
 
 ### 6.2 Projection: $x \to \bar{x}$
-Given a feasible point $x \in \mathbb{R}^n$, project it onto the standard space $\bar{x} \in \mathbb{R}^{\bar{n}}$, synthesizing all structural, bound slack, and constraint slack/surplus variables:
+Given an original point $x \in \mathbb{R}^n$, project it onto the standard space $\bar{x} \in \mathbb{R}^{\bar{n}}$, synthesizing all structural, bound slack, and constraint slack/surplus variables while strictly enforcing feasibility invariants:
 
 ```text
 Algorithm ProjectPrimal(x):
+    Validate x has size n and contains only finite scalars.
+
+    // 0. Pre-validate Variable Bound Feasibility
+    For each original variable j from 0 to n - 1:
+        Assert x[j] respects bounds within numerical tolerance eps = 1e-8:
+            FixedEliminated: |x[j] - fixed_value| <= eps
+            Identity:        x[j] >= -eps
+            LowerShift:      x[j] >= l_j - eps
+            UpperReflect:    x[j] <= u_j + eps
+            BoxBound:        l_j - eps <= x[j] <= u_j + eps
+        Reject if any bound is violated.
+
     Initialize x_bar in R^n_bar with zeros
 
-    // 1. Project Decision Variables
+    // 1. Project Decision Variables (with clamping of eps underflow to 0)
     For each original variable j from 0 to n - 1:
         mapping = variable_mappings[j]
         Switch mapping.type:
             Case Identity:
-                x_bar[mapping.standard_index_1] = x[j]
+                x_bar[mapping.standard_index_1] = max(0, x[j])
             Case LowerShift:
-                x_bar[mapping.standard_index_1] = x[j] - mapping.shift_offset
+                x_bar[mapping.standard_index_1] = max(0, x[j] - mapping.shift_offset)
             Case UpperReflect:
-                x_bar[mapping.standard_index_1] = mapping.shift_offset - x[j]
+                x_bar[mapping.standard_index_1] = max(0, mapping.shift_offset - x[j])
             Case BoxBound:
-                x_bar[mapping.standard_index_1] = x[j] - mapping.shift_offset
-                x_bar[mapping.auxiliary_index]   = (u_j - l_j) - x_bar[mapping.standard_index_1]
+                x_bar[mapping.standard_index_1] = max(0, x[j] - mapping.shift_offset)
+                x_bar[mapping.auxiliary_index]   = max(0, (u_j - l_j) - x_bar[mapping.standard_index_1])
             Case FreeSplit:
                 If x[j] >= 0:
                     x_bar[mapping.standard_index_1] = x[j]
@@ -220,28 +232,28 @@ Algorithm ProjectPrimal(x):
                     x_bar[mapping.standard_index_1] = 0
                     x_bar[mapping.standard_index_2] = -x[j]
             Case FixedEliminated:
-                // No standard variable to populate
+                // Eliminated from x_bar
 
-    // 2. Project Constraint Auxiliaries
+    // 2. Project Constraint Auxiliaries and Validate Feasibility
     For each original constraint i from 0 to m - 1:
         mapping = constraint_mappings[i]
-        val = sum_j a_ij * x[j]
+        If mapping.type == Free: continue
+
+        Calculate structural sum: sum_j a_ij * x[j]
         Switch mapping.type:
             Case Equality:
-                // No auxiliary variable
+                Assert |structural sum - b_i| <= eps; reject if violated
             Case LessEqual:
-                // a_i^T x + s_i = U_i  =>  s_i = U_i - a_i^T x
-                x_bar[mapping.slack_index] = mapping.upper_bound - val
+                s_i = (U_i - structural sum)
+                Assert s_i >= -eps; reject if violated; set x_bar[slack] = max(0, s_i)
             Case GreaterEqual:
-                // a_i^T x - e_i = L_i  =>  e_i = a_i^T x - L_i
-                x_bar[mapping.surplus_index] = val - mapping.lower_bound
+                e_i = (structural sum - L_i)
+                Assert e_i >= -eps; reject if violated; set x_bar[surplus] = max(0, e_i)
             Case Range:
-                // Row 1: e_i = a_i^T x - L_i
-                // Row 2: s_i = (U_i - L_i) - e_i = U_i - a_i^T x
-                x_bar[mapping.surplus_index] = val - mapping.lower_bound
-                x_bar[mapping.slack_index]   = mapping.upper_bound - val
-            Case Free:
-                // Omitted
+                e_i = (structural sum - L_i)
+                s_i = (U_i - structural sum)
+                Assert e_i >= -eps and s_i >= -eps; reject if violated
+                set x_bar[surplus] = max(0, e_i), x_bar[slack] = max(0, s_i)
 
     Return x_bar
 ```
@@ -293,12 +305,12 @@ The Phase 3A test suite is implemented in [`tests/unit/test_lp_standardization.c
 | `TEST-STD-11` | Range with $L_i = -\infty$ | One-sided range upper bound treated as LessEqual constraint. | **PASSED** |
 | `TEST-STD-12` | Range with $U_i = +\infty$ | One-sided range lower bound treated as GreaterEqual constraint. | **PASSED** |
 | `TEST-STD-13` | Negative RHS Normalization | Constraint with $b_i < 0$; verifies row scaling by $-1$, positive RHS, and metadata recording. | **PASSED** |
-| `TEST-STD-14` | Mixed Complex Model | Model combining all 6 variable classes and all 4 constraint types simultaneously. | **PASSED** |
+| `TEST-STD-14` | Sign-Sensitive Model | Negative bounds, negative costs, fixed var with nonzero cost, negative shifted RHS, and independent hand-calculated objective == 65.0. | **PASSED** |
 | `TEST-STD-15` | Maximization Conversion | Model with $\max f(x)$; verifies cost negation, offset negation, and objective value preservation. | **PASSED** |
 | `TEST-STD-16` | Bidirectional Round-Trip | Verifies $x \to \bar{x} \to x \equiv x$, and $\bar{A} \bar{x} = \bar{b}$ feasibility of projected point. | **PASSED** |
 | `TEST-STD-17` | Large Scale Staircase | 100-variable, 50-constraint band matrix; verifies sparsity pattern and CSR indexing integrity. | **PASSED** |
-| `TEST-STD-18` | Error Handling | Rejection of models with $lb > ub$ or integer/binary variables with descriptive error codes. | **PASSED** |
-| `TEST-PROP-01`| Deterministic Property Suite | 30 randomly generated LPs; verifies non-negative RHS, non-empty CSR, and exact round-trip. | **PASSED** |
+| `TEST-STD-18` | Error & Domain Validation | Rejection of non-finite inputs (NaN, $\pm\infty$), invalid bounds, integer variables, and projection domain rejections (bound & constraint violations). | **PASSED** |
+| `TEST-PROP-01`| Deterministic Property Suite | 30 randomly generated strictly feasible LPs; verifies $\bar{A}\bar{x}=\bar{b}$, $\bar{x}\ge 0$, bidirectional roundtrip, and hand-computed objective. | **PASSED** |
 
 ---
 

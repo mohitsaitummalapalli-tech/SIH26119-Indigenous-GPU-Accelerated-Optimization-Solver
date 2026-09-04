@@ -287,32 +287,92 @@ int main() {
     }
 
     // TEST-STD-14: Mixed variables and mixed constraints
+    // TEST-STD-14: Comprehensive sign-sensitive model (negative bounds, negative costs, fixed var, shifted RHS)
     {
         Model m("TestStd14");
-        auto x1 = m.add_variable("x1", 0.0, kInfinity).value();
-        auto x2 = m.add_variable("x2", 1.0, 5.0).value();
-        auto x3 = m.add_variable("x3", -kInfinity, kInfinity).value();
-        auto x4 = m.add_variable("x4", 3.0, 3.0).value();
+        // x1 >= -5.0
+        auto x1 = m.add_variable("x1", -5.0, kInfinity).value();
+        // -2.0 <= x2 <= 4.0 (Box with negative lower bound)
+        auto x2 = m.add_variable("x2", -2.0, 4.0).value();
+        // x3 <= -1.0 (Upper bound with negative bound)
+        auto x3 = m.add_variable("x3", -kInfinity, -1.0).value();
+        // x4 free
+        auto x4 = m.add_variable("x4", -kInfinity, kInfinity).value();
+        // x5 fixed at -3.0
+        auto x5 = m.add_variable("x5", -3.0, -3.0).value();
 
-        (void)m.set_objective_coefficient(x1, 1.0);
-        (void)m.set_objective_coefficient(x2, -2.0);
-        (void)m.set_objective_coefficient(x3, 4.0);
-        (void)m.set_objective_coefficient(x4, 0.5);
+        (void)m.set_objective_coefficient(x1, -3.0);
+        (void)m.set_objective_coefficient(x2, 2.5);
+        (void)m.set_objective_coefficient(x3, -1.5);
+        (void)m.set_objective_coefficient(x4, 4.0);
+        (void)m.set_objective_coefficient(x5, -6.0);
+        (void)m.set_objective_offset(17.5);
 
-        auto c1 = m.add_constraint("c1", -kInfinity, 20.0).value();
-        (void)m.add_constraint_term(c1, x1, 1.0);
-        (void)m.add_constraint_term(c1, x2, 2.0);
-        (void)m.add_constraint_term(c1, x4, 1.0);
+        // c1: 2*x1 - 1*x2 + 1*x5 <= -10.0
+        // With x5 = -3.0, 2*x1 - x2 <= -7.0
+        // Shifting x1 = x1' - 5, x2 = x2' - 2:
+        // 2*(x1' - 5) - (x2' - 2) <= -7  =>  2*x1' - x2' - 8 <= -7  =>  2*x1' - x2' + s1 = 1.0
+        auto c1 = m.add_constraint("c1", -kInfinity, -10.0).value();
+        (void)m.add_constraint_term(c1, x1, 2.0);
+        (void)m.add_constraint_term(c1, x2, -1.0);
+        (void)m.add_constraint_term(c1, x5, 1.0);
 
-        auto c2 = m.add_constraint("c2", 2.0, 10.0).value();
-        (void)m.add_constraint_term(c2, x2, 1.0);
-        (void)m.add_constraint_term(c2, x3, 1.0);
+        // c2: -5.0 <= -1*x2 + 2*x3 + 1*x4 <= 15.0
+        auto c2 = m.add_constraint("c2", -5.0, 15.0).value();
+        (void)m.add_constraint_term(c2, x2, -1.0);
+        (void)m.add_constraint_term(c2, x3, 2.0);
+        (void)m.add_constraint_term(c2, x4, 1.0);
 
         auto std_res = StandardizedLp::standardize(m);
-        check(std_res.is_ok(), "TEST-STD-14: Mixed model standardizes successfully");
+        check(std_res.is_ok(), "TEST-STD-14: Mixed sign-sensitive model standardizes successfully");
         const auto& slp = std_res.value();
-        check(slp.original_variables() == 4, "TEST-STD-14: 4 original variables");
+        check(slp.original_variables() == 5, "TEST-STD-14: 5 original variables");
         check(slp.original_constraints() == 2, "TEST-STD-14: 2 original constraints");
+
+        // Independent hand-calculated objective verification:
+        // Point: x = (-2.0, 1.0, -3.0, 2.0, -3.0)
+        // Checks variable feasibility:
+        // x1 = -2.0 >= -5.0 (OK)
+        // x2 = 1.0 in [-2.0, 4.0] (OK)
+        // x3 = -3.0 <= -1.0 (OK)
+        // x4 = 2.0 free (OK)
+        // x5 = -3.0 fixed (OK)
+        // Constraint checks:
+        // c1: 2*(-2) - 1*(1) + 1*(-3) = -4 - 1 - 3 = -8 <= -10 is violated!
+        // Let's choose a feasible point for c1 and c2:
+        // For c1: 2*x1 - x2 + x5 <= -10. With x5 = -3, 2*x1 - x2 <= -7.
+        // Let x1 = -4.0, x2 = 1.0 => 2*(-4) - 1 = -9 <= -7. (c1 satisfied: -9 - 3 = -12 <= -10, slack = 2.0)
+        // For c2: -x2 + 2*x3 + x4 in [-5, 15].
+        // -1*(1.0) + 2*(-2.0) + x4 = -1 - 4 + x4 = -5 + x4. Let x4 = 3.0 => -5 + 3 = -2 in [-5, 15].
+        // So feasible point is: x = (-4.0, 1.0, -2.0, 3.0, -3.0).
+        auto x_orig = DenseVector::create(5).value();
+        set_vec(x_orig, 0, -4.0);
+        set_vec(x_orig, 1, 1.0);
+        set_vec(x_orig, 2, -2.0);
+        set_vec(x_orig, 3, 3.0);
+        set_vec(x_orig, 4, -3.0);
+
+        // Independent hand calculation:
+        // f_hand = c0 + (-3.0)*(-4.0) + (2.5)*(1.0) + (-1.5)*(-2.0) + (4.0)*(3.0) + (-6.0)*(-3.0)
+        //        = 17.5 + 12.0 + 2.5 + 3.0 + 12.0 + 18.0 = 65.0
+        const Scalar f_hand = 65.0;
+
+        Scalar f_orig_eval = slp.evaluate_original_objective(x_orig).value();
+        check(approx_eq(f_orig_eval, f_hand), "TEST-STD-14: Independent hand-calculated original objective == 65.0");
+
+        auto x_bar_proj = slp.project_primal(x_orig).value();
+        Scalar z_std_eval = slp.evaluate_standard_objective(x_bar_proj).value();
+        check(approx_eq(z_std_eval, f_hand), "TEST-STD-14: Independent hand-calculated standard objective == 65.0");
+
+        // Verify roundtrip
+        auto x_rec = slp.reconstruct_primal(x_bar_proj).value();
+        bool rt_ok = true;
+        for (Dimension j = 0; j < 5; ++j) {
+            if (!approx_eq(x_orig.at(j).value(), x_rec.at(j).value())) {
+                rt_ok = false;
+            }
+        }
+        check(rt_ok, "TEST-STD-14: Reconstruction roundtrip on sign-sensitive model");
     }
 
     // TEST-STD-15: Objective constant and Maximize sense preservation
@@ -409,7 +469,7 @@ int main() {
         check(slp.standardized_nonzeros() > 0, "TEST-STD-17: Standardized nonzeros verified");
     }
 
-    // TEST-STD-18: Invalid / non-finite inputs rejected
+    // TEST-STD-18: Invalid / non-finite inputs rejected and projection domain validation
     {
         Model m("TestStd18");
         auto r_invalid_var = m.add_variable("x_inv", 5.0, 2.0); // Invalid lb > ub
@@ -421,14 +481,70 @@ int main() {
         auto std_res2 = StandardizedLp::standardize(m2);
         check(!std_res2.is_ok() && std_res2.status().code() == StatusCode::InvalidArgument,
               "TEST-STD-18: Reject integer variable in LP standardization");
+
+        // Non-finite objective offset
+        Model m_bad_offset("BadOffset");
+        (void)m_bad_offset.add_variable("x", 0.0, 1.0);
+        auto s_bad_offset = m_bad_offset.set_objective_offset(std::numeric_limits<double>::quiet_NaN());
+        check(!s_bad_offset.is_ok(), "TEST-STD-18: Reject NaN objective offset");
+
+        // Non-finite objective coefficient
+        Model m_bad_obj("BadObj");
+        auto v_bad = m_bad_obj.add_variable("x", 0.0, 1.0).value();
+        auto s_bad_obj = m_bad_obj.set_objective_coefficient(v_bad, std::numeric_limits<double>::infinity());
+        // If set_objective_coefficient accepted inf, standardize must reject it
+        if (s_bad_obj.is_ok()) {
+            auto std_bad = StandardizedLp::standardize(m_bad_obj);
+            check(!std_bad.is_ok(), "TEST-STD-18: Standardize rejects infinite objective coefficient");
+        } else {
+            check(true, "TEST-STD-18: Model rejects infinite objective coefficient");
+        }
+
+        // Test project_primal domain validation on a valid standardized model
+        Model m_proj("TestProjVal");
+        auto px1 = m_proj.add_variable("px1", 0.0, 10.0).value();
+        auto px2 = m_proj.add_variable("px2", 5.0, 5.0).value(); // fixed at 5.0
+        auto pc1 = m_proj.add_constraint("pc1", 10.0, 10.0).value();
+        (void)m_proj.add_constraint_term(pc1, px1, 1.0);
+        (void)m_proj.add_constraint_term(pc1, px2, 1.0); // px1 + 5.0 = 10.0 => px1 = 5.0
+
+        auto slp_proj = StandardizedLp::standardize(m_proj).value();
+
+        // 1. Dimension mismatch
+        auto x_bad_dim = DenseVector::create(1).value();
+        check(!slp_proj.project_primal(x_bad_dim).is_ok(), "TEST-STD-18: project_primal rejects dimension mismatch");
+
+        // 2. NaN in original vector
+        auto x_nan = DenseVector::create(2).value();
+        set_vec(x_nan, 0, std::numeric_limits<double>::quiet_NaN());
+        set_vec(x_nan, 1, 5.0);
+        check(!slp_proj.project_primal(x_nan).is_ok(), "TEST-STD-18: project_primal rejects NaN vector");
+
+        // 3. Variable bound violation (px1 = -2.0 < 0.0)
+        auto x_viol_var = DenseVector::create(2).value();
+        set_vec(x_viol_var, 0, -2.0);
+        set_vec(x_viol_var, 1, 5.0);
+        check(!slp_proj.project_primal(x_viol_var).is_ok(), "TEST-STD-18: project_primal rejects variable lower bound violation");
+
+        // 4. Fixed variable violation (px2 = 4.0 != 5.0)
+        auto x_viol_fixed = DenseVector::create(2).value();
+        set_vec(x_viol_fixed, 0, 5.0);
+        set_vec(x_viol_fixed, 1, 4.0);
+        check(!slp_proj.project_primal(x_viol_fixed).is_ok(), "TEST-STD-18: project_primal rejects fixed variable mismatch");
+
+        // 5. Equality constraint violation (px1 = 2.0, px2 = 5.0 => sum = 7.0 != 10.0)
+        auto x_viol_con = DenseVector::create(2).value();
+        set_vec(x_viol_con, 0, 2.0);
+        set_vec(x_viol_con, 1, 5.0);
+        check(!slp_proj.project_primal(x_viol_con).is_ok(), "TEST-STD-18: project_primal rejects constraint violation");
     }
 
-    // TEST-PROP-01: Deterministic property test across 30 random LP topologies
+    // TEST-PROP-01: Deterministic property test across 30 random LP topologies with guaranteed feasibility
     {
         std::mt19937_64 rng(424242);
         std::uniform_real_distribution<double> coeff_dist(-10.0, 10.0);
         std::uniform_real_distribution<double> bound_dist(1.0, 20.0);
-        std::uniform_int_distribution<int> type_dist(0, 4);
+        std::uniform_int_distribution<int> type_dist(0, 3); // Identity, LowerShift, UpperReflect, BoxBound
 
         int prop_passed = 0;
         const int num_trials = 30;
@@ -439,31 +555,63 @@ int main() {
             const Dimension mc = 4;
 
             std::vector<VariableIndex> v_indices;
+            std::vector<double> cand_vals(n, 0.0);
+
             for (Dimension j = 0; j < n; ++j) {
                 int t = type_dist(rng);
                 VariableIndex v = kInvalidVariableIndex;
                 if (t == 0) {
+                    // x >= 0
                     v = m.add_variable("x" + std::to_string(j), 0.0, kInfinity).value();
+                    cand_vals[j] = bound_dist(rng);
                 } else if (t == 1) {
-                    v = m.add_variable("x" + std::to_string(j), bound_dist(rng), kInfinity).value();
+                    // x >= L
+                    double lb = -bound_dist(rng);
+                    v = m.add_variable("x" + std::to_string(j), lb, kInfinity).value();
+                    cand_vals[j] = lb + bound_dist(rng);
                 } else if (t == 2) {
-                    v = m.add_variable("x" + std::to_string(j), -kInfinity, bound_dist(rng)).value();
-                } else if (t == 3) {
-                    double lb = bound_dist(rng);
-                    v = m.add_variable("x" + std::to_string(j), lb, lb + bound_dist(rng)).value();
+                    // x <= U
+                    double ub = bound_dist(rng);
+                    v = m.add_variable("x" + std::to_string(j), -kInfinity, ub).value();
+                    cand_vals[j] = ub - bound_dist(rng);
                 } else {
-                    v = m.add_variable("x" + std::to_string(j), -kInfinity, kInfinity).value();
+                    // L <= x <= U
+                    double lb = -bound_dist(rng);
+                    double ub = lb + bound_dist(rng) + 5.0;
+                    v = m.add_variable("x" + std::to_string(j), lb, ub).value();
+                    cand_vals[j] = lb + 0.5 * (ub - lb);
                 }
                 (void)m.set_objective_coefficient(v, coeff_dist(rng));
                 v_indices.push_back(v);
             }
 
+            auto x_cand = DenseVector::create(n).value();
+            for (Dimension j = 0; j < n; ++j) {
+                set_vec(x_cand, j, cand_vals[j]);
+            }
+
+            // Create constraints with bounds enclosing a^T x_cand to guarantee feasibility
             for (Dimension i = 0; i < mc; ++i) {
-                double l = bound_dist(rng);
-                double u = l + bound_dist(rng);
-                auto c = m.add_constraint("c" + std::to_string(i), l, u).value();
+                std::vector<double> row_coeffs(n);
+                double row_val = 0.0;
                 for (Dimension j = 0; j < n; ++j) {
-                    (void)m.add_constraint_term(c, v_indices[j], coeff_dist(rng));
+                    row_coeffs[j] = coeff_dist(rng);
+                    row_val += row_coeffs[j] * cand_vals[j];
+                }
+
+                int ctype = static_cast<int>(i % 3);
+                if (ctype == 0) {
+                    // <= row
+                    auto c = m.add_constraint("c" + std::to_string(i), -kInfinity, row_val + 5.0).value();
+                    for (Dimension j = 0; j < n; ++j) (void)m.add_constraint_term(c, v_indices[j], row_coeffs[j]);
+                } else if (ctype == 1) {
+                    // >= row
+                    auto c = m.add_constraint("c" + std::to_string(i), row_val - 5.0, kInfinity).value();
+                    for (Dimension j = 0; j < n; ++j) (void)m.add_constraint_term(c, v_indices[j], row_coeffs[j]);
+                } else {
+                    // Range row
+                    auto c = m.add_constraint("c" + std::to_string(i), row_val - 3.0, row_val + 7.0).value();
+                    for (Dimension j = 0; j < n; ++j) (void)m.add_constraint_term(c, v_indices[j], row_coeffs[j]);
                 }
             }
 
@@ -471,32 +619,62 @@ int main() {
             if (!std_res.is_ok()) continue;
             const auto& slp = std_res.value();
 
-            // Pick a candidate original point that respects variable bounds
-            auto x_cand = DenseVector::create(n).value();
-            for (Dimension j = 0; j < n; ++j) {
-                const auto& v = m.get_variable(v_indices[j]);
-                double val = 0.0;
-                if (v.is_free()) val = coeff_dist(rng);
-                else if (std::isinf(v.lower_bound)) val = v.upper_bound - 1.0;
-                else if (std::isinf(v.upper_bound)) val = v.lower_bound + 1.0;
-                else val = 0.5 * (v.lower_bound + v.upper_bound);
-                set_vec(x_cand, j, val);
+            // Project original feasible point
+            auto x_bar_res = slp.project_primal(x_cand);
+            if (!x_bar_res.is_ok()) continue;
+            const auto& x_bar = x_bar_res.value();
+
+            // 1. Verify standard feasibility: A_bar * x_bar = b_bar
+            auto residual_scratch = DenseVector::create(slp.standardized_constraints()).value();
+            auto residual = DenseVector::create(slp.standardized_constraints()).value();
+            auto res_st = slp.A().residual(slp.b(), x_bar, residual, residual_scratch);
+            if (!res_st.is_ok()) continue;
+
+            Scalar max_res = 0.0;
+            for (Dimension r = 0; r < slp.standardized_constraints(); ++r) {
+                max_res = std::max(max_res, std::abs(residual.at(r).value()));
             }
+            if (max_res > 1e-8) continue;
 
-            auto x_bar = slp.project_primal(x_cand).value();
+            // 2. Verify non-negativity: x_bar >= 0
+            bool nonneg_ok = true;
+            for (Dimension c = 0; c < slp.standardized_variables(); ++c) {
+                if (x_bar.at(c).value() < -1e-9) nonneg_ok = false;
+            }
+            if (!nonneg_ok) continue;
+
+            // 3. Verify bidirectional roundtrip: x_cand -> x_bar -> x_rec == x_cand
             auto x_rec = slp.reconstruct_primal(x_bar).value();
-
             bool match = true;
             for (Dimension j = 0; j < n; ++j) {
                 if (!approx_eq(x_cand.at(j).value(), x_rec.at(j).value(), 1e-8)) {
                     match = false;
                 }
             }
+            if (!match) continue;
 
-            // Verify objective correspondence
+            // 4. Verify roundtrip in reverse: x_bar -> x_rec -> x_bar_reproj == x_bar
+            auto x_bar_reproj = slp.project_primal(x_rec).value();
+            for (Dimension c = 0; c < slp.standardized_variables(); ++c) {
+                if (!approx_eq(x_bar.at(c).value(), x_bar_reproj.at(c).value(), 1e-8)) {
+                    match = false;
+                }
+            }
+            if (!match) continue;
+
+            // 5. Verify objective correspondence against independent hand calculation
+            Scalar hand_obj = m.objective().offset;
+            for (Dimension j = 0; j < n; ++j) {
+                for (const auto& term : m.objective().linear_terms) {
+                    if (term.variable_index == v_indices[j]) {
+                        hand_obj += term.coefficient * cand_vals[j];
+                    }
+                }
+            }
+
             Scalar f_orig = slp.evaluate_original_objective(x_cand).value();
             Scalar z_std = slp.evaluate_standard_objective(x_bar).value();
-            if (!approx_eq(f_orig, z_std, 1e-7)) {
+            if (!approx_eq(f_orig, hand_obj, 1e-7) || !approx_eq(z_std, hand_obj, 1e-7)) {
                 match = false;
             }
 

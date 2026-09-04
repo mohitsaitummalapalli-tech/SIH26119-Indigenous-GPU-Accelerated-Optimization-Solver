@@ -16,22 +16,81 @@ Result<StandardizedLp> StandardizedLp::standardize(const Model& model) {
         return Status::error(StatusCode::InvalidArgument, "Model is not a continuous Linear Program");
     }
 
-    StandardizedLp std_lp;
-    std_lp.original_sense_ = model.objective().sense;
-    std_lp.original_c0_ = model.objective().offset;
-    std_lp.original_nnz_ = model.num_nonzeros();
+    // Comprehensive non-finite and domain validation
+    if (std::isnan(model.objective().offset) || std::isinf(model.objective().offset)) {
+        return Status::error(StatusCode::InvalidArgument, "Non-finite objective offset");
+    }
 
     auto num_vars_res = to_dimension(model.num_variables());
     if (!num_vars_res.is_ok()) {
         return num_vars_res.status();
     }
-    std_lp.num_original_vars_ = num_vars_res.value();
+    const Dimension num_orig_vars = num_vars_res.value();
+
+    for (Dimension j = 0; j < num_orig_vars; ++j) {
+        const auto& v = model.get_variable(static_cast<VariableIndex>(j));
+        if (v.type != VariableType::Continuous) {
+            return Status::error(StatusCode::InvalidArgument, "Model contains non-continuous variable");
+        }
+        if (std::isnan(v.lower_bound) || std::isnan(v.upper_bound)) {
+            return Status::error(StatusCode::InvalidArgument, "NaN variable bound detected");
+        }
+        if (v.lower_bound > v.upper_bound) {
+            return Status::error(StatusCode::InvalidBounds, "Variable lower bound exceeds upper bound");
+        }
+        if (std::isinf(v.lower_bound) && v.lower_bound > 0.0) {
+            return Status::error(StatusCode::InvalidBounds, "Variable lower bound cannot be +infinity");
+        }
+        if (std::isinf(v.upper_bound) && v.upper_bound < 0.0) {
+            return Status::error(StatusCode::InvalidBounds, "Variable upper bound cannot be -infinity");
+        }
+    }
+
+    for (const auto& term : model.objective().linear_terms) {
+        if (std::isnan(term.coefficient) || std::isinf(term.coefficient)) {
+            return Status::error(StatusCode::InvalidArgument, "Non-finite linear objective coefficient");
+        }
+        if (term.variable_index >= num_orig_vars) {
+            return Status::error(StatusCode::InvalidVariableReference, "Objective references invalid variable index");
+        }
+    }
 
     auto num_cons_res = to_dimension(model.num_constraints());
     if (!num_cons_res.is_ok()) {
         return num_cons_res.status();
     }
-    std_lp.num_original_cons_ = num_cons_res.value();
+    const Dimension num_orig_cons = num_cons_res.value();
+
+    for (Dimension i = 0; i < num_orig_cons; ++i) {
+        const auto& con = model.get_constraint(static_cast<ConstraintIndex>(i));
+        if (std::isnan(con.lower_bound) || std::isnan(con.upper_bound)) {
+            return Status::error(StatusCode::InvalidArgument, "NaN constraint bound detected");
+        }
+        if (con.lower_bound > con.upper_bound) {
+            return Status::error(StatusCode::InvalidBounds, "Constraint lower bound exceeds upper bound");
+        }
+        if (std::isinf(con.lower_bound) && con.lower_bound > 0.0) {
+            return Status::error(StatusCode::InvalidBounds, "Constraint lower bound cannot be +infinity");
+        }
+        if (std::isinf(con.upper_bound) && con.upper_bound < 0.0) {
+            return Status::error(StatusCode::InvalidBounds, "Constraint upper bound cannot be -infinity");
+        }
+        for (const auto& term : con.terms) {
+            if (std::isnan(term.coefficient) || std::isinf(term.coefficient)) {
+                return Status::error(StatusCode::InvalidArgument, "Non-finite constraint coefficient");
+            }
+            if (term.variable_index >= num_orig_vars) {
+                return Status::error(StatusCode::InvalidVariableReference, "Constraint references invalid variable index");
+            }
+        }
+    }
+
+    StandardizedLp std_lp;
+    std_lp.original_sense_ = model.objective().sense;
+    std_lp.original_c0_ = model.objective().offset;
+    std_lp.original_nnz_ = model.num_nonzeros();
+    std_lp.num_original_vars_ = num_orig_vars;
+    std_lp.num_original_cons_ = num_orig_cons;
 
     const bool is_maximize = (std_lp.original_sense_ == ObjectiveSense::Maximize);
     std_lp.c0_bar_ = is_maximize ? -std_lp.original_c0_ : std_lp.original_c0_;
@@ -375,6 +434,54 @@ Result<DenseVector> StandardizedLp::project_primal(const DenseVector& x_orig) co
         return Status::error(StatusCode::InvalidArgument, "Original vector dimension mismatch during projection");
     }
 
+    constexpr Scalar kFeasTol = 1e-8;
+
+    // Validate that x_orig is finite and respects variable bounds
+    for (Dimension j = 0; j < num_original_vars_; ++j) {
+        auto get_res = x_orig.at(j);
+        if (!get_res.is_ok()) return get_res.status();
+        const Scalar xj = get_res.value();
+        if (!std::isfinite(xj)) {
+            return Status::error(StatusCode::InvalidArgument, "Non-finite value in original vector during projection");
+        }
+
+        const auto& mapping = var_mappings_[j];
+        switch (mapping.transform_type) {
+            case VariableTransformType::FixedEliminated:
+                if (std::abs(xj - mapping.fixed_value) > kFeasTol) {
+                    return Status::error(StatusCode::InvalidBounds,
+                        "Original vector violates fixed variable value during projection");
+                }
+                break;
+            case VariableTransformType::Identity:
+                if (xj < -kFeasTol) {
+                    return Status::error(StatusCode::InvalidBounds,
+                        "Original vector violates non-negativity bound during projection");
+                }
+                break;
+            case VariableTransformType::LowerShift:
+                if (xj < mapping.original_lb - kFeasTol) {
+                    return Status::error(StatusCode::InvalidBounds,
+                        "Original vector violates lower bound during projection");
+                }
+                break;
+            case VariableTransformType::UpperReflect:
+                if (xj > mapping.original_ub + kFeasTol) {
+                    return Status::error(StatusCode::InvalidBounds,
+                        "Original vector violates upper bound during projection");
+                }
+                break;
+            case VariableTransformType::BoxBound:
+                if (xj < mapping.original_lb - kFeasTol || xj > mapping.original_ub + kFeasTol) {
+                    return Status::error(StatusCode::InvalidBounds,
+                        "Original vector violates box bounds during projection");
+                }
+                break;
+            case VariableTransformType::FreeSplit:
+                break;
+        }
+    }
+
     auto res = DenseVector::create(standardized_variables());
     if (!res.is_ok()) {
         return res.status();
@@ -384,33 +491,36 @@ Result<DenseVector> StandardizedLp::project_primal(const DenseVector& x_orig) co
     // 1. Project variables
     for (Dimension j = 0; j < num_original_vars_; ++j) {
         const auto& mapping = var_mappings_[j];
-        auto get_res = x_orig.at(j);
-        if (!get_res.is_ok()) return get_res.status();
-        const Scalar xj = get_res.value();
+        const Scalar xj = x_orig.at(j).value();
 
         switch (mapping.transform_type) {
             case VariableTransformType::FixedEliminated:
                 // Eliminated from x_bar
                 break;
             case VariableTransformType::Identity: {
-                auto st = x_bar.set(mapping.std_var_primary, xj);
+                Scalar val = std::max(0.0, xj);
+                auto st = x_bar.set(mapping.std_var_primary, val);
                 if (!st.is_ok()) return st;
                 break;
             }
             case VariableTransformType::LowerShift: {
-                auto st = x_bar.set(mapping.std_var_primary, xj - mapping.original_lb);
+                Scalar val = std::max(0.0, xj - mapping.original_lb);
+                auto st = x_bar.set(mapping.std_var_primary, val);
                 if (!st.is_ok()) return st;
                 break;
             }
             case VariableTransformType::UpperReflect: {
-                auto st = x_bar.set(mapping.std_var_primary, mapping.original_ub - xj);
+                Scalar val = std::max(0.0, mapping.original_ub - xj);
+                auto st = x_bar.set(mapping.std_var_primary, val);
                 if (!st.is_ok()) return st;
                 break;
             }
             case VariableTransformType::BoxBound: {
-                auto st1 = x_bar.set(mapping.std_var_primary, xj - mapping.original_lb);
+                Scalar val_prim = std::max(0.0, xj - mapping.original_lb);
+                Scalar val_slack = std::max(0.0, mapping.original_ub - xj);
+                auto st1 = x_bar.set(mapping.std_var_primary, val_prim);
                 if (!st1.is_ok()) return st1;
-                auto st2 = x_bar.set(mapping.std_var_slack, mapping.original_ub - xj);
+                auto st2 = x_bar.set(mapping.std_var_slack, val_slack);
                 if (!st2.is_ok()) return st2;
                 break;
             }
@@ -431,11 +541,10 @@ Result<DenseVector> StandardizedLp::project_primal(const DenseVector& x_orig) co
         }
     }
 
-    // 2. Project constraint auxiliaries
+    // 2. Project constraint auxiliaries and validate constraint feasibility
     for (Dimension i = 0; i < num_original_cons_; ++i) {
         const auto& mapping = con_mappings_[i];
-        if (mapping.transform_type == ConstraintTransformType::Free ||
-            mapping.transform_type == ConstraintTransformType::Equality) {
+        if (mapping.transform_type == ConstraintTransformType::Free) {
             continue;
         }
 
@@ -446,15 +555,19 @@ Result<DenseVector> StandardizedLp::project_primal(const DenseVector& x_orig) co
         for (auto nz = r_start; nz < r_end; ++nz) {
             Index col = A_bar_.col_idx()[nz];
             if (col != mapping.auxiliary_primary && col != mapping.auxiliary_secondary) {
-                auto val_res = x_bar.at(col);
-                if (!val_res.is_ok()) return val_res.status();
-                structural_sum += A_bar_.values()[nz] * val_res.value();
+                structural_sum += A_bar_.values()[nz] * x_bar.at(col).value();
             }
         }
 
-        auto b_val_res = b_bar_.at(primary_row);
-        if (!b_val_res.is_ok()) return b_val_res.status();
-        Scalar b_val = b_val_res.value();
+        Scalar b_val = b_bar_.at(primary_row).value();
+
+        if (mapping.transform_type == ConstraintTransformType::Equality) {
+            if (std::abs(structural_sum - b_val) > kFeasTol) {
+                return Status::error(StatusCode::InvalidBounds,
+                    "Original vector violates equality constraint during projection");
+            }
+            continue;
+        }
 
         Scalar aux_coeff = 0.0;
         for (auto nz = r_start; nz < r_end; ++nz) {
@@ -466,19 +579,19 @@ Result<DenseVector> StandardizedLp::project_primal(const DenseVector& x_orig) co
 
         if (std::abs(aux_coeff) > 0.0) {
             Scalar aux_val = (b_val - structural_sum) / aux_coeff;
+            if (aux_val < -kFeasTol) {
+                return Status::error(StatusCode::InvalidBounds,
+                    "Original vector violates inequality constraint during projection");
+            }
+            aux_val = std::max(0.0, aux_val);
             auto st = x_bar.set(mapping.auxiliary_primary, aux_val);
             if (!st.is_ok()) return st;
         }
 
         if (mapping.transform_type == ConstraintTransformType::Range) {
             Index range_row = mapping.generated_rows[1];
-            auto b_range_res = b_bar_.at(range_row);
-            if (!b_range_res.is_ok()) return b_range_res.status();
-            Scalar b_range = b_range_res.value();
-
-            auto s_res = x_bar.at(mapping.auxiliary_primary);
-            if (!s_res.is_ok()) return s_res.status();
-            Scalar s_val = s_res.value();
+            Scalar b_range = b_bar_.at(range_row).value();
+            Scalar s_val = x_bar.at(mapping.auxiliary_primary).value();
 
             Scalar t_coeff = 1.0;
             auto r2_start = A_bar_.row_ptr()[range_row];
@@ -491,6 +604,11 @@ Result<DenseVector> StandardizedLp::project_primal(const DenseVector& x_orig) co
             }
 
             Scalar t_val = (b_range - (t_coeff > 0.0 ? s_val : -s_val)) / t_coeff;
+            if (t_val < -kFeasTol) {
+                return Status::error(StatusCode::InvalidBounds,
+                    "Original vector violates range constraint upper bound during projection");
+            }
+            t_val = std::max(0.0, t_val);
             auto st = x_bar.set(mapping.auxiliary_secondary, t_val);
             if (!st.is_ok()) return st;
         }
