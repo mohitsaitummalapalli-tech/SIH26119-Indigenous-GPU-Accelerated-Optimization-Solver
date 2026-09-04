@@ -57,3 +57,8 @@ add_test(NAME LpStandardizationTest COMMAND test_lp_standardization)
 add_executable(test_basis test_basis.cpp)
 target_link_libraries(test_basis PRIVATE sih26119_solver)
 add_test(NAME BasisTest COMMAND test_basis)
+
+# Phase 3C: Basis Factorization Layer
+add_executable(test_basis_factorization test_basis_factorization.cpp)
+target_link_libraries(test_basis_factorization PRIVATE sih26119_solver)
+add_test(NAME BasisFactorizationTest COMMAND test_basis_factorization)

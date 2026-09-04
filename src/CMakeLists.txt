@@ -11,6 +11,7 @@ add_library(sih26119_solver STATIC
     solver/lp/basis.cpp
     solver/lp/basic_solution.cpp
     solver/lp/basis_matrix_view.cpp
+    solver/lp/basis_factorization.cpp
 )
 
 target_include_directories(sih26119_solver PUBLIC

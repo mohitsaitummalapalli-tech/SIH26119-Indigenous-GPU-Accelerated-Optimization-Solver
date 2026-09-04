@@ -20,7 +20,8 @@ enum class StatusCode {
     IOError,
     ParseError,
     UnsupportedFeature,
-    InconsistentModel
+    InconsistentModel,
+    NumericalFailure
 };
 
 inline std::string_view status_code_to_string(StatusCode code) noexcept {
@@ -38,6 +39,7 @@ inline std::string_view status_code_to_string(StatusCode code) noexcept {
         case StatusCode::ParseError: return "ParseError";
         case StatusCode::UnsupportedFeature: return "UnsupportedFeature";
         case StatusCode::InconsistentModel: return "InconsistentModel";
+        case StatusCode::NumericalFailure: return "NumericalFailure";
     }
     return "UnknownStatus";
 }
